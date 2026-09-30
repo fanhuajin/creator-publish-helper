@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.log
+current_copy.json
+current_copy.tmp
+后台进程.json
+启动日志.txt
