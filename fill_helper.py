@@ -376,4 +376,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    instance_kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    instance_kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    instance_kernel.CreateMutexW.restype = wintypes.HANDLE
+    instance_kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    instance_handle = instance_kernel.CreateMutexW(None, False, "Local\\CreatorPublishHelper")
+    instance_error = ctypes.get_last_error()
+    if not instance_handle:
+        raise ctypes.WinError(instance_error)
+    try:
+        if instance_error == 183:
+            print("助手已经运行，请直接使用 F5 / F6 / F7 / F8；按 F9 退出。", flush=True)
+        else:
+            main()
+    finally:
+        instance_kernel.CloseHandle(instance_handle)
