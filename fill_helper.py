@@ -56,6 +56,19 @@ def detect_platform(window_title):
     return found[0]
 
 
+def discard_pending_hotkeys(user):
+    """丢弃处理期间排队的 F5/F6，保留 F9 的退出意图，不动其他 Windows 消息。"""
+    message = wintypes.MSG()
+    ignored = 0
+    exit_requested = False
+    while user.PeekMessageW(ctypes.byref(message), None, 0x312, 0x312, 1):
+        if message.wParam == 4:
+            exit_requested = True
+        elif message.wParam in (1, 5):
+            ignored += 1
+    return ignored, exit_requested
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("copy_file", type=Path, nargs="?", help="可选的初始发布文案路径")
@@ -77,6 +90,11 @@ def main():
     user.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
     user.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
     user.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+    user.PeekMessageW.argtypes = [
+        ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+        wintypes.UINT, wintypes.UINT, wintypes.UINT,
+    ]
+    user.PeekMessageW.restype = wintypes.BOOL
     user.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
     user.GetForegroundWindow.restype = wintypes.HWND
     user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
@@ -254,9 +272,11 @@ def main():
         print("F5：直接使用资源管理器选中的文案文件，成功后弹出提示；其他窗口打开选择框。", flush=True)
         print("B站各字段分别按 F6；抖音/小红书正文一次填写简介和话题。", flush=True)
         print("执行时按住 Esc 可中止。剪贴板会被覆盖。", flush=True)
+        print("填写期间重复 F6 将忽略，不会排队重复输入；F9 在本次处理结束后退出。", flush=True)
         print("先在资源管理器选中文案并按 F5，再使用填写快捷键。", flush=True)
         message = wintypes.MSG()
-        while True:
+        exit_requested = False
+        while not exit_requested:
             result = user.GetMessageW(ctypes.byref(message), None, 0, 0)
             if result == -1:
                 raise ctypes.WinError(ctypes.get_last_error())
@@ -271,6 +291,9 @@ def main():
             trigger = {1: 0x75, 5: 0x74}[action]
             while user.GetAsyncKeyState(trigger) & 0x8000:
                 time.sleep(0.02)
+            # 同步填写会阻塞 GetMessage，重复快捷键实际在系统消息队列中排队。
+            # 保持热键注册以拦截 F6，结束时清理队列，避免 F6 落到浏览器切换焦点。
+            print("状态：正在选择文案。" if action == 5 else "状态：正在识别并填写。", flush=True)
             try:
                 if action == 5:
                     select_copy()
@@ -342,6 +365,11 @@ def main():
                     messagebox.showerror("未执行自动填写", str(error), parent=dialog)
                 finally:
                     dialog.destroy()
+            finally:
+                ignored, exit_requested = discard_pending_hotkeys(user)
+                if ignored:
+                    print(f"已忽略处理期间重复的快捷键：{ignored} 次。", flush=True)
+                print("状态：空闲。", flush=True)
     finally:
         for number in registered:
             user.UnregisterHotKey(None, number)

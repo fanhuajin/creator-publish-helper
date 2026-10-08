@@ -5,7 +5,7 @@ import tempfile
 
 from PIL import Image, ImageDraw
 
-from fill_helper import candidate_stable, candidate_visible, detect_platform, read_copy
+from fill_helper import candidate_stable, candidate_visible, detect_platform, read_copy, discard_pending_hotkeys
 from focus_detection import classify_field
 
 
@@ -76,7 +76,21 @@ def main():
             pass
         else:
             raise AssertionError("未知、歧义或未聚焦控件必须拒绝填写")
-    print("文案解析、平台识别、焦点字段识别与候选检测检查通过")
+    class PendingMessages:
+        def __init__(self, actions):
+            self.actions = list(actions)
+
+        def PeekMessageW(self, pointer, window, minimum, maximum, remove):
+            assert minimum == maximum == 0x312 and remove == 1
+            if not self.actions:
+                return 0
+            pointer._obj.wParam = self.actions.pop(0)
+            return 1
+
+    assert discard_pending_hotkeys(PendingMessages([1, 1, 5])) == (3, False)
+    assert discard_pending_hotkeys(PendingMessages([1, 4, 1])) == (2, True)
+    assert discard_pending_hotkeys(PendingMessages([])) == (0, False)
+    print("文案、平台、焦点、候选检测及重复热键队列检查通过")
 
 
 if __name__ == "__main__":
