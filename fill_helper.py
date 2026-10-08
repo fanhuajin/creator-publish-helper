@@ -10,6 +10,7 @@ import json
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import ImageChops, ImageGrab
+from focus_detection import focused_field
 
 
 def candidate_visible(before, current):
@@ -218,7 +219,7 @@ def main():
             else:
                 filename = filedialog.askopenfilename(
                     parent=dialog,
-                initialdir=str(current.parent if current else Path.home()),
+                    initialdir=str(current.parent if current else Path.home()),
                     title="选择当前视频的发布文案",
                     filetypes=[("文案文本", "*.txt"), ("所有文件", "*.*")],
                 )
@@ -235,7 +236,7 @@ def main():
             print(f"文案选中成功：{selected}", flush=True)
             messagebox.showinfo(
                 "文案选中成功",
-                f"文件：{selected}\n\n标题：{selected_title}\n\n切回输入框后使用 F6 / F7 / F8。",
+                f"文件：{selected}\n\n标题：{selected_title}\n\n切回目标输入框后按 F6 自动填写。",
                 parent=dialog,
             )
         except Exception as error:
@@ -245,15 +246,14 @@ def main():
 
     registered = []
     try:
-        for number, code in [(1, 0x75), (2, 0x76), (3, 0x77), (4, 0x78), (5, 0x74)]:
+        for number, code in [(1, 0x75), (4, 0x78), (5, 0x74)]:
             if not user.RegisterHotKey(None, number, 0x4000, code):
                 raise RuntimeError(f"F{code - 0x6F} 被其他程序占用，请关闭冲突程序")
             registered.append(number)
-        print("点击标题框按 F6；点击简介框按 F7；点击标签输入框按 F8。F9 退出。", flush=True)
+        print("点击目标输入框后按 F6 自动识别并填写。F9 退出。", flush=True)
         print("F5：直接使用资源管理器选中的文案文件，成功后弹出提示；其他窗口打开选择框。", flush=True)
-        print("请手动删除旧标签，点击标签输入框后按 F8 添加；不需要记录位置。", flush=True)
+        print("B站各字段分别按 F6；抖音/小红书正文一次填写简介和话题。", flush=True)
         print("执行时按住 Esc 可中止。剪贴板会被覆盖。", flush=True)
-        print("F8 自动识别平台：B站回车，抖音/小红书检测候选后空格。", flush=True)
         print("先在资源管理器选中文案并按 F5，再使用填写快捷键。", flush=True)
         message = wintypes.MSG()
         while True:
@@ -268,15 +268,16 @@ def main():
             if action == 4:
                 break
             # 等触发键释放后输入，避免仍按着功能键时混入组合键。
-            trigger = {1: 0x75, 2: 0x76, 3: 0x77, 5: 0x74}[action]
+            trigger = {1: 0x75, 5: 0x74}[action]
             while user.GetAsyncKeyState(trigger) & 0x8000:
                 time.sleep(0.02)
             try:
                 if action == 5:
                     select_copy()
                     continue
+                source_window = user.GetForegroundWindow()
                 window_title = ctypes.create_unicode_buffer(1024)
-                user.GetWindowTextW(user.GetForegroundWindow(), window_title, len(window_title))
+                user.GetWindowTextW(source_window, window_title, len(window_title))
                 platform = detect_platform(window_title.value)
                 # 每次快捷键重新读取当前选择，切换稿件无需重启后台程序。
                 selection = Path(__file__).with_name("current_copy.json")
@@ -284,10 +285,15 @@ def main():
                 if copy_file is None:
                     raise ValueError("请先选中文案文件并按 F5。")
                 title, description, tags = read_copy(copy_file)
-                print(f"平台：{platform}；稿件：{copy_file.parent.name}", flush=True)
-                if action in (1, 2):
-                    paste(title if action == 1 else description, True)
-                elif action == 3 and platform == "bilibili":
+                field = focused_field(platform, source_window)
+                if user.GetForegroundWindow() != source_window:
+                    raise RuntimeError("窗口已切换，本次未输入。")
+                print(f"平台：{platform}；字段：{field}；稿件：{copy_file.parent.name}", flush=True)
+                if field == "title":
+                    paste(title, True)
+                elif field == "description" and platform == "bilibili":
+                    paste(description, True)
+                elif field == "tags":
                     # 旧标签由用户清理，只在已聚焦的标签输入框逐个追加。
                     for tag in tags:
                         if stopped() or not paste(tag, False):
@@ -296,7 +302,10 @@ def main():
                             break
                         key(0x0D)
                         time.sleep(0.35)
-                elif action == 3:
+                elif field == "description":
+                    # 共用正文编辑器时先替换简介，再在同一焦点追加话题。
+                    if not paste(description + " ", True):
+                        continue
                     # 恢复用户确认有效的固定等待流程；截图变化不代表候选准备完成。
                     region = None
                     if platform in ("douyin", "xiaohongshu"):
@@ -326,6 +335,13 @@ def main():
                 print("本次输入结束，请检查网页结果。", flush=True)
             except Exception as error:
                 print(f"输入停止：{error}", flush=True)
+                dialog = tk.Tk()
+                dialog.withdraw()
+                dialog.attributes("-topmost", True)
+                try:
+                    messagebox.showerror("未执行自动填写", str(error), parent=dialog)
+                finally:
+                    dialog.destroy()
     finally:
         for number in registered:
             user.UnregisterHotKey(None, number)

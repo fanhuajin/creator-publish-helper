@@ -4,5 +4,6 @@ __pycache__/
 *.log
 current_copy.json
 current_copy.tmp
+focus_diagnostic.json
 后台进程.json
 启动日志.txt
