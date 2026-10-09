@@ -12,6 +12,17 @@ def classify_field(platform, observation):
     focused = [control for control in controls if control.get("focused") or control.get("focus_origin")]
     if not focused:
         raise ValueError("没有识别到已聚焦的输入框，请先点击目标输入框。")
+    if all(
+        control.get("control_type") == "ControlType.Pane"
+        and control.get("class_name") == "View"
+        and not any(control.get(key) for key in ("name", "help", "label"))
+        for control in focused
+    ):
+        raise ValueError(
+            "浏览器未向 Windows 暴露网页输入框。\n"
+            "Edge 请打开 edge://accessibility，Chrome 请打开 chrome://accessibility，"
+            "开启 Native accessibility（原生可访问性），然后回到投稿页点击输入框再按 F6。"
+        )
 
     def matches(text):
         text = str(text or "").strip().strip("*＊：: ").lower()
@@ -48,6 +59,11 @@ def classify_field(platform, observation):
                 continue
             class_name = control.get("class_name", "").lower()
             known_editor = any(name in class_name.split() for name in ("ql-editor", "prosemirror", "tiptap"))
+            # 抖音 Slate 正文的稳定类名；不使用带构建哈希的外层容器类名。
+            if platform == "douyin" and control.get("focus_origin"):
+                known_editor = known_editor or {
+                    "zone-container", "editor-kit-container", "editor-comp-publish"
+                }.issubset(class_name.split())
             writable = control.get("text_read_only") is False
             if known_editor or writable:
                 result.add("description")
@@ -62,7 +78,8 @@ def classify_field(platform, observation):
 def focused_field(platform, expected_window):
     """通过系统 UI Automation 只读探测，超时或窗口改变时停止，不操作浏览器。"""
     process = subprocess.run(
-        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
+         "-ExecutionPolicy", "Bypass", "-File",
          str(Path(__file__).with_name("focus_probe.ps1"))],
         capture_output=True,
         encoding="utf-8-sig",
@@ -71,7 +88,8 @@ def focused_field(platform, expected_window):
         creationflags=subprocess.CREATE_NO_WINDOW,
     )
     if process.returncode:
-        raise RuntimeError("无法读取浏览器焦点控件，请确认页面输入框已聚焦。")
+        detail = (process.stderr or process.stdout).strip()
+        raise RuntimeError("浏览器焦点检测脚本执行失败：\n" + (detail or f"退出码 {process.returncode}"))
     observation = json.loads(process.stdout)
     handle = observation.get("window_handle")
     if not handle or handle != expected_window:

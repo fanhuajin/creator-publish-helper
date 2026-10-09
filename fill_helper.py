@@ -347,8 +347,8 @@ def main():
                 title, description, tags = read_copy(copy_file)
                 field = focused_field(platform, source_window)
                 if automation_request:
-                    if platform != "bilibili":
-                        raise ValueError("自动化协作目前仅支持B站。")
+                    if platform not in ("bilibili", "douyin", "xiaohongshu"):
+                        raise ValueError("自动化协作目前仅支持B站、抖音和小红书。")
                     validate_keyboard_request(automation_request, source_window, field)
                     automation_window = source_window
                 if user.GetForegroundWindow() != source_window:
@@ -448,7 +448,7 @@ if __name__ == "__main__":
         raise ctypes.WinError(instance_error)
     try:
         if instance_error == 183:
-            print("助手已经运行，请直接使用 F5 / F6 / F7 / F8；按 F9 退出。", flush=True)
+            print("创作者投稿助手已经运行：F5 选择文案，F6 自动识别并填写；F9 退出。", flush=True)
         else:
             main()
     finally:

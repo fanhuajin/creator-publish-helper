@@ -3,6 +3,8 @@
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch, Mock
+from subprocess import CompletedProcess
 from datetime import datetime, timedelta
 
 from PIL import Image, ImageDraw
@@ -11,7 +13,7 @@ from fill_helper import (
     candidate_stable, candidate_visible, detect_platform, read_copy,
     discard_pending_hotkeys, validate_keyboard_request, write_keyboard_state,
 )
-from focus_detection import classify_field
+from focus_detection import classify_field, focused_field
 from bilibili_auto import (
     BilibiliDraft, CHINA_TIME, ControlSnapshot, category_from_folder, choose_control, cover_from_folder,
     is_upload_url, parse_publish_time, prepare_files,
@@ -19,6 +21,21 @@ from bilibili_auto import (
 
 
 def main():
+    with patch("focus_detection.subprocess.run", return_value=CompletedProcess(
+        [], 0, '{"window_handle":123,"controls":[{"focused":true,"name":"作品标题"}]}', ""
+    )) as probe:
+        assert focused_field("douyin", 123) == "title"
+        command = probe.call_args.args[0]
+        assert command[command.index("-ExecutionPolicy") + 1] == "Bypass"
+    with patch("focus_detection.subprocess.run", return_value=CompletedProcess(
+        [], 1, "", "probe failed"
+    )):
+        try:
+            focused_field("douyin", 123)
+        except RuntimeError as error:
+            assert "probe failed" in str(error)
+        else:
+            raise AssertionError("脚本错误必须保留具体原因")
     request = {"id": "测试请求", "window": 123, "field": "title"}
     validate_keyboard_request(request, 123, "title")
     for window, field in ((124, "title"), (123, "description"), (123, "unknown")):
@@ -49,6 +66,14 @@ def main():
     draft.scroll_page = lambda direction, amount: scrolls.append(direction)
     assert draft.find("标题") is target
     assert scrolls == ["down"]
+    schedule_draft = object.__new__(BilibiliDraft)
+    schedule_draft.window = SimpleNamespace(BoundingRectangle=SimpleNamespace(bottom=1000))
+    schedule_positions = iter((950, 650))
+    schedule_draft.find = lambda name: SimpleNamespace(BoundingRectangle=SimpleNamespace(bottom=next(schedule_positions)))
+    schedule_scrolls = []
+    schedule_draft.scroll_page = lambda direction, amount: schedule_scrolls.append((direction, amount))
+    assert schedule_draft.reveal_schedule().BoundingRectangle.bottom == 650
+    assert schedule_scrolls == [("down", 2)]
     correct = SimpleNamespace(GetValuePattern=lambda: SimpleNamespace(Value="含AI生成内容"))
     draft.find = lambda name, editable=False: correct
     draft.click = lambda control: (_ for _ in ()).throw(AssertionError("正确声明不应点击"))
@@ -58,7 +83,58 @@ def main():
     draft.controls = lambda: [SimpleNamespace(Name="舞蹈", BoundingRectangle=SimpleNamespace(top=300))]
     draft.visible = lambda control: True
     draft.category("舞蹈")
+    tag_draft = object.__new__(BilibiliDraft)
+    tag_draft.find = lambda *args, **kwargs: object()
+    tag_draft.click = lambda control: None
+    tag_draft.keys = lambda keys: None
+    tag_draft.keyboard_field = lambda field: None
+    tag_states = iter((["还可以添加10个标签"], ["还可以添加9个标签", "舞蹈"]))
+    tag_draft.control_names = lambda: next(tag_states)
+    assert tag_draft.fill_tags(["舞蹈", "未接受标签"]) is False
+    concurrent = object.__new__(BilibiliDraft)
+    order = []
+    for operation in ("select_browser", "start_keyboard_helper", "upload", "scroll_page", "wait_name",
+                      "input_column", "cover", "keyboard_fill", "declaration", "category",
+                      "fill_tags", "description", "schedule", "wait_uploaded", "find", "click"):
+        setattr(concurrent, operation, lambda *args, op=operation, **kwargs: order.append(op))
+    concurrent.locate = lambda name: None
+    concurrent.run(Path("作品/最终成片.mp4"), "标题", "简介", ["标签"], Path("封面.png"), "舞蹈", None)
+    assert order.index("cover") < order.index("wait_uploaded")
+    assert order.index("schedule") < order.index("wait_uploaded") < order.index("click")
+    from publish_queue import PublishQueue
+    queue = object.__new__(PublishQueue)
+    queue.running = queue.closed = False
+    queue.items = {"one": {"folder": Path("one"), "scheduled": False, "date": "", "hour": ""},
+                   "two": {"folder": Path("two"), "scheduled": False, "date": "", "hour": ""}}
+    queue.completed = []
+    queue.root = Mock()
+    queue.start_button = Mock()
+    queue.tree = Mock()
+    queue.notice = Mock()
+    queue.status_file = Mock()
+    queue.prepare = lambda folder: (folder / "最终成片.mp4", "标题", "简介", ["标签"])
+    queue.cover = lambda folder: folder / "B站4x3.png"
+    queue.category = lambda folder: "舞蹈"
+    first, second = Mock(), Mock()
+    first.actual_publish_at = second.actual_publish_at = None
+    second.run.side_effect = RuntimeError("模拟下一条失败")
+    queue.draft_class = Mock(side_effect=[first, second])
+    queue.start()
+    assert list(queue.items) == ["two"]
+    assert len(queue.completed) == 1
+    first.next_upload.assert_called_once()
+    second.next_upload.assert_not_called()
+    queue.tree.delete.assert_called_once_with("one")
+    paused = object.__new__(BilibiliDraft)
+    paused.window = None
+    paused.on_tick = None
+    paused.on_pause = Mock()
+    paused.paused_seconds = 0.0
+    with patch("bilibili_auto.ctypes.windll.user32.GetAsyncKeyState", return_value=0x8000):
+        paused.check()
+    paused.on_pause.assert_called_once()
     now = datetime(2026, 10, 9, 12, 0, tzinfo=CHINA_TIME)
+    assert parse_publish_time("2026-10-10 03:39", now, require_five_minutes=False) == datetime(2026, 10, 10, 3, 39, tzinfo=CHINA_TIME)
     assert parse_publish_time("", now) is None
     assert parse_publish_time("2026-10-09 12:05", now) == now + timedelta(minutes=5)
     assert parse_publish_time("2026-10-24 12:00", now) == now + timedelta(days=15)
@@ -173,6 +249,18 @@ def main():
         "text_read_only": False,
     }]}
     assert classify_field("douyin", rich_editor) == "description"
+    douyin_editor = {"controls": [{
+        "focus_origin": True, "control_type": "ControlType.Group",
+        "class_name": "zone-container editor-kit-container editor editor-comp-publish notranslate chrome window chrome88",
+    }]}
+    assert classify_field("douyin", douyin_editor) == "description"
+    for platform in ("bilibili", "xiaohongshu"):
+        try:
+            classify_field(platform, douyin_editor)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("抖音编辑器类名不能用于识别其他平台")
     for control in [
         {"focus_origin": True, "automation_id": "RootWebArea", "text_read_only": False},
         {"focus_origin": True, "control_type": "ControlType.Group", "text_read_only": True},
