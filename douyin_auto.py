@@ -17,11 +17,8 @@ class DouyinDraft(BilibiliDraft):
         self.window = windows[0]
         self.window.SetFocus()
         time.sleep(0.3)
-        self.keys("{Ctrl}l")
-        self.clipboard.copy("")
-        self.keys("{Ctrl}c")
-        url = urlsplit(self.clipboard.paste())
-        self.keys("{Esc}")
+        from browser_page import read_browser_url
+        url = urlsplit(read_browser_url(self.uia, self.window, self.page_title))
         if url.hostname != "creator.douyin.com" or not url.path.startswith("/creator-micro/content/"):
             raise RuntimeError("当前页面不是抖音创作者投稿页面。")
 

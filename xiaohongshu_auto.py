@@ -27,11 +27,8 @@ class XiaohongshuDraft(DouyinDraft):
             raise RuntimeError("小红书标签页不可见。")
         self.click_at(((r.left+r.right)//2,(r.top+r.bottom)//2))
         time.sleep(0.3)
-        self.keys("{Ctrl}l")
-        self.clipboard.copy("")
-        self.keys("{Ctrl}c")
-        url = urlsplit(self.clipboard.paste())
-        self.keys("{Esc}")
+        from browser_page import read_browser_url
+        url = urlsplit(read_browser_url(self.uia, self.window, self.page_title))
         if url.hostname != "creator.xiaohongshu.com":
             raise RuntimeError("当前页面不是小红书创作服务平台。")
 

@@ -406,17 +406,8 @@ class BilibiliDraft:
         self.window = windows[0]
         self.window.SetFocus()
         time.sleep(0.3)
-        # 浏览器文档暴露页面URL时直接读取，避免地址栏复制受剪贴板竞争影响。
-        for item in self.controls():
-            if item.ControlTypeName == "DocumentControl" and "创作中心" in item.Name:
-                pattern = item.GetValuePattern()
-                if pattern and is_upload_url(pattern.Value):
-                    return
-        self.keys("{Ctrl}l")
-        self.clipboard.copy("")
-        self.keys("{Ctrl}c")
-        url = self.clipboard.paste()
-        self.keys("{Esc}")
+        from browser_page import read_browser_url
+        url = read_browser_url(self.uia, self.window, "创作中心")
         if not is_upload_url(url):
             raise RuntimeError("当前标签页不是B站视频投稿页面。")
 
