@@ -7,10 +7,32 @@ from pathlib import Path
 import re
 import time
 import json
+import os
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from PIL import ImageChops, ImageGrab
 from focus_detection import focused_field
+
+AUTOMATION_REQUEST = Path(__file__).with_name("keyboard_request.json")
+AUTOMATION_RESULT = Path(__file__).with_name("keyboard_result.json")
+AUTOMATION_READY = Path(__file__).with_name("keyboard_ready.json")
+
+
+def write_keyboard_state(path, value):
+    """原子写入本地协作状态，读取方不会看到半个JSON文件。"""
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def validate_keyboard_request(request, window, field):
+    """自动化请求必须与当前窗口和F6实际识别的字段一致，不按请求盲填。"""
+    if not isinstance(request.get("id"), str) or not request["id"]:
+        raise ValueError("按键版请求缺少标识。")
+    if request.get("window") != window or request.get("field") != field:
+        raise ValueError("按键版识别的窗口或字段与自动化目标不一致，本次未输入。")
+    if field not in ("title", "description", "tags"):
+        raise ValueError("不支持的自动化填写字段。")
 
 
 def candidate_visible(before, current):
@@ -107,9 +129,12 @@ def main():
     shell.DragQueryFileW.argtypes = [wintypes.HANDLE, wintypes.UINT, wintypes.LPWSTR, wintypes.UINT]
     shell.DragQueryFileW.restype = wintypes.UINT
     user.SetProcessDPIAware()
+    automation_window = None
 
     def stopped():
-        return bool(user.GetAsyncKeyState(0x1B) & 0x8000)
+        return bool(user.GetAsyncKeyState(0x1B) & 0x8000) or (
+            automation_window is not None and user.GetForegroundWindow() != automation_window
+        )
 
     def paste(text, replace):
         data = text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-16-le") + b"\0\0"
@@ -268,6 +293,7 @@ def main():
             if not user.RegisterHotKey(None, number, 0x4000, code):
                 raise RuntimeError(f"F{code - 0x6F} 被其他程序占用，请关闭冲突程序")
             registered.append(number)
+        write_keyboard_state(AUTOMATION_READY, {"pid": os.getpid(), "protocol": 1})
         print("点击目标输入框后按 F6 自动识别并填写。F9 退出。", flush=True)
         print("F5：直接使用资源管理器选中的文案文件，成功后弹出提示；其他窗口打开选择框。", flush=True)
         print("B站各字段分别按 F6；抖音/小红书正文一次填写简介和话题。", flush=True)
@@ -294,21 +320,37 @@ def main():
             # 同步填写会阻塞 GetMessage，重复快捷键实际在系统消息队列中排队。
             # 保持热键注册以拦截 F6，结束时清理队列，避免 F6 落到浏览器切换焦点。
             print("状态：正在选择文案。" if action == 5 else "状态：正在识别并填写。", flush=True)
+            automation_request = None
+            automation_result = None
             try:
                 if action == 5:
                     select_copy()
                     continue
                 source_window = user.GetForegroundWindow()
+                if AUTOMATION_REQUEST.exists():
+                    automation_request = json.loads(AUTOMATION_REQUEST.read_text(encoding="utf-8"))
+                    AUTOMATION_REQUEST.unlink()
                 window_title = ctypes.create_unicode_buffer(1024)
                 user.GetWindowTextW(source_window, window_title, len(window_title))
                 platform = detect_platform(window_title.value)
                 # 每次快捷键重新读取当前选择，切换稿件无需重启后台程序。
                 selection = Path(__file__).with_name("current_copy.json")
-                copy_file = Path(json.loads(selection.read_text(encoding="utf-8"))["copy_file"]) if selection.exists() else args.copy_file
+                if automation_request:
+                    copy_file = Path(automation_request["copy_file"])
+                else:
+                    copy_file = (
+                        Path(json.loads(selection.read_text(encoding="utf-8"))["copy_file"])
+                        if selection.exists() else args.copy_file
+                    )
                 if copy_file is None:
                     raise ValueError("请先选中文案文件并按 F5。")
                 title, description, tags = read_copy(copy_file)
                 field = focused_field(platform, source_window)
+                if automation_request:
+                    if platform != "bilibili":
+                        raise ValueError("自动化协作目前仅支持B站。")
+                    validate_keyboard_request(automation_request, source_window, field)
+                    automation_window = source_window
                 if user.GetForegroundWindow() != source_window:
                     raise RuntimeError("窗口已切换，本次未输入。")
                 print(f"平台：{platform}；字段：{field}；稿件：{copy_file.parent.name}", flush=True)
@@ -356,8 +398,20 @@ def main():
                         print(f"已发送空格：#{tag}，请检查关联结果。", flush=True)
                         time.sleep(0.15)
                 print("本次输入结束，请检查网页结果。", flush=True)
+                if automation_request:
+                    if stopped():
+                        raise RuntimeError("用户中止按键版输入。")
+                    automation_result = {
+                        "id": automation_request["id"], "ok": True,
+                    }
             except Exception as error:
                 print(f"输入停止：{error}", flush=True)
+                if automation_request:
+                    # 自动化由主流程显示错误，避免两个弹窗争抢焦点。
+                    automation_result = {
+                        "id": automation_request.get("id"), "ok": False, "message": str(error),
+                    }
+                    continue
                 dialog = tk.Tk()
                 dialog.withdraw()
                 dialog.attributes("-topmost", True)
@@ -367,12 +421,20 @@ def main():
                     dialog.destroy()
             finally:
                 ignored, exit_requested = discard_pending_hotkeys(user)
+                automation_window = None
                 if ignored:
                     print(f"已忽略处理期间重复的快捷键：{ignored} 次。", flush=True)
+                # 清理重复热键后才确认完成，下一字段的F6不会被当成上一字段的重复键。
+                if automation_result:
+                    write_keyboard_state(AUTOMATION_RESULT, automation_result)
                 print("状态：空闲。", flush=True)
     finally:
         for number in registered:
             user.UnregisterHotKey(None, number)
+        if AUTOMATION_READY.exists():
+            ready = json.loads(AUTOMATION_READY.read_text(encoding="utf-8"))
+            if ready.get("pid") == os.getpid():
+                AUTOMATION_READY.unlink()
 
 
 if __name__ == "__main__":

@@ -6,14 +6,20 @@ import ctypes
 from datetime import datetime, timedelta, timezone
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 import time
 import traceback
+import uuid
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog
 from urllib.parse import urlsplit
 
-from fill_helper import read_copy
+from fill_helper import (
+    AUTOMATION_READY, AUTOMATION_REQUEST, AUTOMATION_RESULT,
+    read_copy, write_keyboard_state,
+)
 
 CHINA_TIME = timezone(timedelta(hours=8))
 
@@ -139,6 +145,7 @@ class BilibiliDraft:
         self.desktop = Desktop()
         self.window = None
         self.form_left = None
+        self.copy_file = None
 
     def check(self):
         """每步输入前检查取消键及窗口，窗口被切走即停，不抢回焦点。"""
@@ -267,6 +274,63 @@ class BilibiliDraft:
         self.click(control)
         self.keys("{Ctrl}a")
         self.paste(value)
+        self.verify_text(value)
+
+    def start_keyboard_helper(self, copy_file):
+        """复用正在运行的按键版；未运行时启动，F6仍由按键版注册和处理。"""
+        self.copy_file = copy_file
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenMutexW.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_wchar_p]
+        kernel.OpenMutexW.restype = ctypes.c_void_p
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel.OpenMutexW(0x100000, False, "Local\\CreatorPublishHelper")
+        if handle:
+            kernel.CloseHandle(handle)
+        else:
+            AUTOMATION_READY.unlink(missing_ok=True)
+            subprocess.Popen(
+                [sys.executable, "-B", "-u", "-X", "utf8",
+                 str(Path(__file__).with_name("fill_helper.py")), str(copy_file)],
+                cwd=Path(__file__).parent, creationflags=subprocess.CREATE_NO_WINDOW,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            self.check()
+            if AUTOMATION_READY.exists():
+                ready = json.loads(AUTOMATION_READY.read_text(encoding="utf-8"))
+                if ready.get("protocol") == 1:
+                    return
+            time.sleep(0.1)
+        raise RuntimeError("按键版未准备好。如果旧版正在运行，请按F9退出一次后重试。")
+
+    def keyboard_field(self, field):
+        """聚焦完成后触发F6，等待按键版明确回执，不自行输入文案。"""
+        request_id = uuid.uuid4().hex
+        self.check()
+        write_keyboard_state(AUTOMATION_REQUEST, {
+            "id": request_id, "window": self.window.NativeWindowHandle,
+            "field": field, "copy_file": str(self.copy_file),
+        })
+        try:
+            self.keys("{F6}")
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                self.check()
+                if AUTOMATION_RESULT.exists():
+                    result = json.loads(AUTOMATION_RESULT.read_text(encoding="utf-8"))
+                    if result.get("id") == request_id:
+                        if not result.get("ok"):
+                            raise RuntimeError(result.get("message", "按键版填写失败。"))
+                        return
+                time.sleep(0.1)
+            raise RuntimeError("等待按键版F6填写超时，停止后续操作。")
+        finally:
+            AUTOMATION_REQUEST.unlink(missing_ok=True)
+
+    def keyboard_fill(self, control, field, value):
+        self.click(control)
+        self.keyboard_field(field)
         self.verify_text(value)
 
     def select_browser(self):
@@ -440,24 +504,18 @@ class BilibiliDraft:
             self.keys("{Back}")
         else:
             raise RuntimeError("旧标签未能清理，请手动清空标签后重试。")
-        for index, tag in enumerate(tags, 1):
-            self.click(self.find("按回车键Enter创建标签", editable=True))
-            self.paste(tag)
-            self.keys("{Enter}")
-            deadline = time.monotonic() + 3
-            expected = f"还可以添加{10 - index}个标签"
-            while time.monotonic() < deadline:
-                if any(expected in name for name in self.control_names()):
-                    break
-                time.sleep(0.1)
-            else:
-                raise RuntimeError(f"未确认标签关联：{tag}。")
+        self.click(self.find("按回车键Enter创建标签", editable=True))
+        self.keyboard_field("tags")
+        names = self.control_names()
+        expected = f"还可以添加{10 - len(tags)}个标签"
+        if not any(expected in name for name in names) or any(tag not in names for tag in tags):
+            raise RuntimeError("按键版输入后的标签数量或内容不一致。")
 
     def description(self, value):
         hint = "填写更全面的相关信息，让更多的人能找到你的视频吧"
         for control in self.controls():
             if control.Name == hint and self.visible(control):
-                self.fill(control, value)
+                self.keyboard_fill(control, "description", value)
                 return
         # 已填内容时提示消失：以“简介”所在行和标题输入框的列定位正文区域。
         # ponytail: 只支持B站当前表单布局；标签与输入列无法同时确认时停止。
@@ -477,7 +535,7 @@ class BilibiliDraft:
             raise RuntimeError("简介未获得编辑焦点，停止输入。")
         if focus.AutomationId == "RootWebArea":
             raise RuntimeError("焦点为整个页面，停止输入。")
-        self.paste(value)
+        self.keyboard_field("description")
         self.verify_text(value)
 
     def schedule_fields(self):
@@ -572,13 +630,14 @@ class BilibiliDraft:
 
     def run(self, video, title, description, tags, cover, category, publish_at):
         self.select_browser()
+        self.start_keyboard_helper(video.parent / "发布文案.txt")
         self.upload(video)
         self.wait_uploaded()
         # 一次回到表单开头；后续查找只向下，先封面再标题。
         self.scroll_page("up", 30)
         self.input_column()
         self.cover(cover)
-        self.fill(self.find("请输入稿件标题", editable=True), title)
+        self.keyboard_fill(self.find("请输入稿件标题", editable=True), "title", title)
         print("标题已核对。", flush=True)
         self.declaration()
         self.category(category)

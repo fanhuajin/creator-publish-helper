@@ -1,5 +1,11 @@
 __pycache__/
 bilibili_auto_status.json
+keyboard_request.json
+keyboard_request.tmp
+keyboard_result.json
+keyboard_result.tmp
+keyboard_ready.json
+keyboard_ready.tmp
 *.py[cod]
 .venv/
 *.log

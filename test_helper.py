@@ -7,7 +7,10 @@ from datetime import datetime, timedelta
 
 from PIL import Image, ImageDraw
 
-from fill_helper import candidate_stable, candidate_visible, detect_platform, read_copy, discard_pending_hotkeys
+from fill_helper import (
+    candidate_stable, candidate_visible, detect_platform, read_copy,
+    discard_pending_hotkeys, validate_keyboard_request, write_keyboard_state,
+)
 from focus_detection import classify_field
 from bilibili_auto import (
     BilibiliDraft, CHINA_TIME, ControlSnapshot, category_from_folder, choose_control, cover_from_folder,
@@ -16,6 +19,20 @@ from bilibili_auto import (
 
 
 def main():
+    request = {"id": "测试请求", "window": 123, "field": "title"}
+    validate_keyboard_request(request, 123, "title")
+    for window, field in ((124, "title"), (123, "description"), (123, "unknown")):
+        try:
+            validate_keyboard_request(request, window, field)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("自动化请求不得填写到其他窗口或字段")
+    with tempfile.TemporaryDirectory() as directory:
+        state = Path(directory) / "状态.json"
+        write_keyboard_state(state, request)
+        assert "测试请求" in state.read_text(encoding="utf-8")
+        assert not state.with_suffix(".tmp").exists()
     source = SimpleNamespace(
         Name="上传完成", ControlTypeName="TextControl",
         BoundingRectangle=object(), IsOffscreen=False,
