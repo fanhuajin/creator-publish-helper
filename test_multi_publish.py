@@ -34,14 +34,33 @@ class QueueTests(unittest.TestCase):
 
     def test_failure_resume_skips_success(self):
         item=self.item(); drafts={p:Mock() for p in PLATFORMS}
-        drafts["douyin"].run.side_effect=RuntimeError("上传失败")
+        drafts["xiaohongshu"].run.side_effect=RuntimeError("上传失败")
         q=self.queue(item,self.adapters(drafts)); q.start()
-        self.assertEqual(item["states"]["bilibili"],"已完成")
-        self.assertEqual(item["states"]["douyin"],"失败")
-        drafts["douyin"].run.side_effect=None
+        self.assertEqual(item["states"]["douyin"],"已完成")
+        self.assertEqual(item["states"]["xiaohongshu"],"失败")
+        drafts["bilibili"].run.assert_not_called()
+        drafts["xiaohongshu"].run.side_effect=None
         q.start()
-        self.assertEqual(drafts["bilibili"].run.call_count,1)
+        self.assertEqual(drafts["douyin"].run.call_count,1)
         self.assertTrue(all(s=="已完成" for s in item["states"].values()))
+
+    def test_publish_order(self):
+        item=self.item(); drafts={p:Mock() for p in PLATFORMS}
+        order=[]
+        for p,draft in drafts.items():
+            draft.run.side_effect=lambda *args,p=p:order.append(p)
+        self.queue(item,self.adapters(drafts)).start()
+        self.assertEqual(order,["douyin","xiaohongshu","bilibili"])
+
+    def test_legacy_saving_error_resumes_settings(self):
+        item=self.item()
+        item["states"]["douyin"]="失败"
+        item["details"]["douyin"]={"submitted":False,
+            "error":"没有找到“不允许”，页面或浏览器可访问性可能发生变化。"}
+        drafts={p:Mock() for p in PLATFORMS}
+        self.queue(item,self.adapters(drafts)).start()
+        self.assertEqual(drafts["douyin"].resume_stage,"settings")
+        self.assertEqual(item["details"]["douyin"]["stage"],"settings")
 
     def test_submission_uncertain_blocks_retry(self):
         item=self.item(); drafts={p:Mock() for p in PLATFORMS}
@@ -52,6 +71,17 @@ class QueueTests(unittest.TestCase):
         q=self.queue(item,self.adapters(drafts)); q.start(); q.start()
         self.assertEqual(item["states"]["bilibili"],"待核对")
         self.assertEqual(drafts["bilibili"].run.call_count,1)
+
+    def test_empty_exception_records_type_and_location(self):
+        item=self.item(); item["states"]["douyin"]="已完成"
+        drafts={p:Mock() for p in PLATFORMS}
+        drafts["xiaohongshu"].run.side_effect=StopIteration()
+        self.queue(item,self.adapters(drafts)).start()
+        detail=item["details"]["xiaohongshu"]
+        self.assertIn("StopIteration",detail["error"])
+        self.assertIn("StopIteration",detail["traceback"])
+        self.assertFalse(detail["submitted"])
+        drafts["douyin"].run.assert_not_called()
 
     def test_restart_and_disk_roundtrip(self):
         item=self.item(); item["states"]["bilibili"]="已完成"

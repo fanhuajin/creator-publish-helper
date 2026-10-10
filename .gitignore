@@ -12,6 +12,7 @@ keyboard_ready.tmp
 current_copy.json
 current_copy.tmp
 focus_diagnostic.json
+bilibili_declaration_diagnostic.json
 后台进程.json
 启动日志.txt
 
@@ -29,3 +30,4 @@ xiaohongshu_queue_state.tmp
 xiaohongshu_auto_status.json
 multi_publish_state.json
 multi_publish_state.tmp
+multi_publish_state.json.manual-backup

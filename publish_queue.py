@@ -64,6 +64,10 @@ class WorkRows(ttk.Frame):
     def selection(self):
         return tuple(key for key, row in self.rows.items() if row["selected"].get())
 
+    def select_all(self, selected=True):
+        for row in self.rows.values():
+            row["selected"].set(selected)
+
     def delete(self, key):
         self.rows.pop(key)["frame"].destroy()
 

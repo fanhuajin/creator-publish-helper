@@ -16,13 +16,37 @@ from focus_detection import focused_field
 AUTOMATION_REQUEST = Path(__file__).with_name("keyboard_request.json")
 AUTOMATION_RESULT = Path(__file__).with_name("keyboard_result.json")
 AUTOMATION_READY = Path(__file__).with_name("keyboard_ready.json")
+KEYBOARD_PROTOCOL = 2
 
 
 def write_keyboard_state(path, value):
     """原子写入本地协作状态，读取方不会看到半个JSON文件。"""
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    for attempt in range(10):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if attempt==9:
+                raise
+            time.sleep(0.05)
+
+
+def read_keyboard_state(path):
+    """状态文件替换时可能短暂被锁定，由调用方在原等待时限内重读。"""
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, PermissionError):
+        return None
+
+
+def keyboard_helper_ready(ready):
+    if ready is None:
+        return False
+    if ready.get("protocol") != KEYBOARD_PROTOCOL:
+        raise RuntimeError("旧版F6助手仍在运行。请按F9退出它，再点击继续；当前未填写或发布。")
+    return True
 
 
 def validate_keyboard_request(request, window, field):
@@ -200,11 +224,11 @@ def main():
         return True
 
     def wait_topic_fast(before, region):
-        """最多等一秒；浮层出现且连续稳定才提前确认，漏判时回落固定等待。"""
+        """候选浮层出现并稳定后才确认；未检测到时不得当作输入成功。"""
         started = time.monotonic()
         previous = None
         stable_frames = 0
-        while time.monotonic() - started < 1:
+        while time.monotonic() - started < 4:
             if stopped():
                 return False
             current = ImageGrab.grab(bbox=region)
@@ -212,13 +236,13 @@ def main():
             stable = previous is not None and candidate_stable(previous, current)
             stable_frames = stable_frames + 1 if visible and stable else 0
             # 为输入后的异步候选更新保留最少时间，不只看到框就立即按空格。
-            if stable_frames >= 2 and time.monotonic() - started >= 0.3:
-                print("候选区域出现并稳定，提前发送空格。", flush=True)
+            if stable_frames >= 3 and time.monotonic() - started >= 1.2:
+                print("候选区域出现并稳定，发送空格。", flush=True)
                 return True
             previous = current
             time.sleep(0.06)
-        print("检测未确认，使用一秒等待。", flush=True)
-        return True
+        print("未检测到稳定的话题候选，停止输入。", flush=True)
+        return False
 
     def select_copy():
         """优先读取资源管理器选中文件；其他窗口打开选择框，校验成功才切换稿件。"""
@@ -293,7 +317,7 @@ def main():
             if not user.RegisterHotKey(None, number, 0x4000, code):
                 raise RuntimeError(f"F{code - 0x6F} 被其他程序占用，请关闭冲突程序")
             registered.append(number)
-        write_keyboard_state(AUTOMATION_READY, {"pid": os.getpid(), "protocol": 1})
+        write_keyboard_state(AUTOMATION_READY, {"pid": os.getpid(), "protocol": KEYBOARD_PROTOCOL})
         print("点击目标输入框后按 F6 自动识别并填写。F9 退出。", flush=True)
         print("F5：直接使用资源管理器选中的文案文件，成功后弹出提示；其他窗口打开选择框。", flush=True)
         print("B站各字段分别按 F6；抖音/小红书正文一次填写简介和话题。", flush=True)
@@ -393,10 +417,10 @@ def main():
                             break
                         confirmed = wait_topic_fast(before, region) if region else wait_topic()
                         if not confirmed:
-                            break
+                            raise RuntimeError(f"话题 #{tag} 的候选未确认，未继续输入或发布，请检查当前正文。")
                         key(0x20)
                         print(f"已发送空格：#{tag}，请检查关联结果。", flush=True)
-                        time.sleep(0.15)
+                        time.sleep(0.5)
                 print("本次输入结束，请检查网页结果。", flush=True)
                 if automation_request:
                     if stopped():

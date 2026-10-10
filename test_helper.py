@@ -114,12 +114,13 @@ def main():
     order = []
     for operation in ("select_browser", "start_keyboard_helper", "upload", "scroll_page", "wait_name",
                       "input_column", "cover", "keyboard_fill", "declaration", "category",
-                      "fill_tags", "description", "schedule", "wait_uploaded", "find", "click"):
+                      "fill_tags", "description", "schedule", "wait_uploaded", "find", "click", "check", "on_submit"):
         setattr(concurrent, operation, lambda *args, op=operation, **kwargs: order.append(op))
     concurrent.locate = lambda name: None
     concurrent.run(Path("作品/最终成片.mp4"), "标题", "简介", ["标签"], Path("封面.png"), "舞蹈", None)
     assert order.index("cover") < order.index("wait_uploaded")
     assert order.index("schedule") < order.index("wait_uploaded") < order.index("click")
+    assert order.index("wait_uploaded") < order.index("on_submit") < order.index("click")
     from publish_queue import PublishQueue
     queue = object.__new__(PublishQueue)
     queue.running = queue.closed = False

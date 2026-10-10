@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 from fill_helper import (
     AUTOMATION_READY, AUTOMATION_REQUEST, AUTOMATION_RESULT,
-    read_copy, write_keyboard_state,
+    read_copy, write_keyboard_state, read_keyboard_state, keyboard_helper_ready,
 )
 from native_mouse import mouse_event, pointer_path
 
@@ -327,6 +327,28 @@ class BilibiliDraft:
         rect = control.BoundingRectangle
         self.click_at(((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2))
 
+    def click_declaration(self, control):
+        """仅声明菜单使用实时位置检查，其他平台沿用原有点击流程。"""
+        self.check()
+        live = control.control if isinstance(control, ControlSnapshot) else control
+        for _ in range(4):
+            if not self.visible(live):
+                raise RuntimeError("目标控件已离开可见区域，停止输入。")
+            rect = live.BoundingRectangle
+            target = ((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+            self.move_pointer(target)
+            # 图片加载或展开动画会改变排版，移动结束后再读实时位置。
+            latest = live.BoundingRectangle
+            current = ((latest.left + latest.right) // 2, (latest.top + latest.bottom) // 2)
+            if current != target:
+                continue
+            cursor = self.uia.GetCursorPos()
+            if abs(cursor[0]-target[0]) > 2 or abs(cursor[1]-target[1]) > 2:
+                raise RuntimeError(f"鼠标未到达控件：目标{target}，实际{cursor}，未点击。")
+            self.click_at(target)
+            return
+        raise RuntimeError("控件在鼠标移动期间持续改变位置，未点击，请等待页面加载完成。")
+
     def paste(self, value):
         """通过剪贴板和Ctrl+V保留emoji；不调用网页赋值或控件SetValue。"""
         self.check()
@@ -338,10 +360,32 @@ class BilibiliDraft:
         self.keys("{Ctrl}a")
         self.clipboard.copy("")
         self.keys("{Ctrl}c")
-        actual = self.clipboard.paste().replace("\r\n", "\n").strip()
+        deadline=self.now()+1
+        expected_text=expected.replace("\r\n","\n").strip()
+        actual=""
+        while self.now()<deadline:
+            actual = self.clipboard.paste().replace("\r\n", "\n").strip()
+            if actual==expected_text:
+                break
+            time.sleep(0.05)
         self.keys("{End}")
-        if actual != expected.replace("\r\n", "\n").strip():
-            raise RuntimeError("输入结果与文案不一致，流程已停止。")
+        if actual != expected_text:
+            raise RuntimeError(f"输入结果与文案不一致：期望{expected_text!r}，回读{actual!r}，流程已停止。")
+
+    def verify_edit_value(self, hint, expected):
+        """输入框原生只读值不依赖复制快捷键或剪贴板更新时间。"""
+        deadline=self.now()+5
+        actual=None
+        while self.now()<deadline:
+            self.check()
+            entry=self.locate(hint,editable=True)
+            if entry is not None:
+                pattern=entry.GetValuePattern()
+                actual=pattern.Value if pattern is not None else None
+                if actual is not None and actual.strip()==expected.strip():
+                    return
+            time.sleep(0.1)
+        raise RuntimeError(f"输入框核验失败：字段{hint!r}，期望{expected!r}，实际{actual!r}，未继续发布。")
 
     def fill(self, control, value):
         self.click(control)
@@ -370,10 +414,9 @@ class BilibiliDraft:
         deadline = self.now() + 5
         while self.now() < deadline:
             self.check()
-            if AUTOMATION_READY.exists():
-                ready = json.loads(AUTOMATION_READY.read_text(encoding="utf-8"))
-                if ready.get("protocol") == 1:
-                    return
+            ready = read_keyboard_state(AUTOMATION_READY)
+            if keyboard_helper_ready(ready):
+                return
             time.sleep(0.1)
         raise RuntimeError("按键版未准备好。如果旧版正在运行，请按F9退出一次后重试。")
 
@@ -387,24 +430,41 @@ class BilibiliDraft:
         })
         try:
             self.keys("{F6}")
-            deadline = self.now() + 30
+            deadline = self.now() + (90 if field == "description" else 30)
             while self.now() < deadline:
                 self.check()
-                if AUTOMATION_RESULT.exists():
-                    result = json.loads(AUTOMATION_RESULT.read_text(encoding="utf-8"))
-                    if result.get("id") == request_id:
-                        if not result.get("ok"):
-                            raise RuntimeError(result.get("message", "按键版填写失败。"))
-                        return
+                result = read_keyboard_state(AUTOMATION_RESULT)
+                if result is not None and result.get("id") == request_id:
+                    if not result.get("ok"):
+                        raise RuntimeError(result.get("message", "按键版填写失败。"))
+                    return
                 time.sleep(0.1)
             raise RuntimeError("等待按键版F6填写超时，停止后续操作。")
         finally:
             AUTOMATION_REQUEST.unlink(missing_ok=True)
 
     def keyboard_fill(self, control, field, value):
+        if field=="title":
+            pattern=control.GetValuePattern()
+            if pattern is not None and pattern.Value.strip()==value.strip():
+                return
         self.click(control)
+        if field=="title":
+            deadline=self.now()+2
+            while self.now()<deadline:
+                self.check()
+                focus=self.uia.GetFocusedControl()
+                if (focus and focus.ControlTypeName=="EditControl"
+                        and focus.Name==control.Name and focus.AutomationId!="RootWebArea"):
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError("标题点击后未确认输入焦点，未触发F6。")
         self.keyboard_field(field)
-        self.verify_text(value)
+        if field=="title":
+            self.verify_edit_value(control.Name,value)
+        else:
+            self.verify_text(value)
 
     def select_browser(self):
         windows = [
@@ -419,8 +479,31 @@ class BilibiliDraft:
         time.sleep(0.3)
         from browser_page import read_browser_url
         url = read_browser_url(self.uia, self.window, "创作中心")
-        if not is_upload_url(url):
-            raise RuntimeError("当前标签页不是B站视频投稿页面。")
+        self.ensure_upload_page(url)
+
+    def ensure_upload_page(self, url):
+        if is_upload_url(url):
+            return
+        parsed = urlsplit(url)
+        # 管理页是发布后及重新打开创作中心的常见入口。
+        # 仅在核验官方管理页后点击投稿，不在其他网页上查找同名按钮。
+        if (parsed.scheme != "https" or parsed.hostname != "member.bilibili.com"
+                or parsed.path.rstrip("/") not in (
+                    "/platform/upload-manager/article", "/platform/upload-manager/video")):
+            raise RuntimeError(f"当前标签页不是B站视频投稿页或稿件管理页：{url}")
+        entry = self.locate("投稿") or self.locate("视频投稿")
+        if entry is None:
+            raise RuntimeError("当前是B站稿件管理页，未找到“投稿”入口，请打开视频投稿页后继续。")
+        self.click(entry)
+        from browser_page import read_browser_url
+        deadline = self.now() + 20
+        while self.now() < deadline:
+            self.check()
+            current = read_browser_url(self.uia, self.window, "创作中心")
+            if is_upload_url(current):
+                return
+            time.sleep(0.2)
+        raise RuntimeError("点击B站投稿入口后未进入视频投稿页，未上传或提交。")
 
     def upload(self, video):
         names = self.control_names()
@@ -505,14 +588,79 @@ class BilibiliDraft:
         entry = self.find("请选择符合您视频内容的创作声明", editable=True)
         if entry.GetValuePattern().Value == "含AI生成内容":
             return
-        if entry.BoundingRectangle.bottom > self.window.BoundingRectangle.bottom - 250:
-            self.scroll_page("down", 4)
+        option = self.locate("含AI生成内容")
+        if option is None:
+            # 为下拉菜单保留空间，逐格滚动并重新读取输入框的位置。
+            for _ in range(20):
+                rect = entry.BoundingRectangle
+                window = self.window.BoundingRectangle
+                if rect.top > window.top + 140 and rect.bottom < window.bottom - 250:
+                    break
+                self.scroll_page("up" if rect.top <= window.top + 140 else "down", 1)
+                entry = self.locate("请选择符合您视频内容的创作声明", editable=True)
+                if entry is None:
+                    raise RuntimeError("创作声明输入框滚动后不可见，未继续发布。")
+            else:
+                raise RuntimeError("无法为创作声明菜单留出可见空间，未继续发布。")
+            self.click_declaration(self.declaration_opener(entry))
+            try:
+                option = self.wait_name("含AI生成内容", timeout=3)
+            except RuntimeError as error:
+                if str(error) != "等待“含AI生成内容”超时。":
+                    raise
+                # 点击有时仅聚焦只读输入框。焦点核验后用系统方向键展开。
+                focused = self.uia.GetFocusedControl()
+                bounds = focused.BoundingRectangle
+                rect = entry.BoundingRectangle
+                if (focused.Name != entry.Name or
+                        not rect.left <= (bounds.left+bounds.right)/2 <= rect.right or
+                        not rect.top <= (bounds.top+bounds.bottom)/2 <= rect.bottom):
+                    self.save_declaration_diagnostic()
+                    raise RuntimeError("创作声明菜单未展开且焦点不在声明框，诊断已保存，未发布。") from error
+                self.keys("{Down}")
+                try:
+                    option = self.wait_name("含AI生成内容", timeout=10)
+                except RuntimeError:
+                    self.save_declaration_diagnostic()
+                    raise
+        self.click(option)
+        deadline = self.now() + 5
+        while self.now() < deadline:
             entry = self.find("请选择符合您视频内容的创作声明", editable=True)
-        self.click(entry)
-        self.click(self.wait_name("含AI生成内容"))
-        entry = self.find("请选择符合您视频内容的创作声明", editable=True)
-        if entry.GetValuePattern().Value != "含AI生成内容":
-            raise RuntimeError("未确认AI创作声明。")
+            if entry.GetValuePattern().Value == "含AI生成内容":
+                return
+            time.sleep(0.15)
+        raise RuntimeError("未确认AI创作声明，未继续发布。")
+
+    def declaration_opener(self, entry):
+        """优先定位输入框内实际下拉箭头；只读输入框中央不一定展开菜单。"""
+        rect = entry.BoundingRectangle
+        candidates=[]
+        for control in self.controls():
+            bounds=control.BoundingRectangle
+            if (self.visible(control)
+                    and control.ControlTypeName in ("TextControl","ImageControl","ButtonControl")
+                    and rect.right-60 <= bounds.left < bounds.right <= rect.right
+                    and rect.top <= bounds.top < bounds.bottom <= rect.bottom
+                    and bounds.width() <= 35 and bounds.height() <= 45):
+                candidates.append(control)
+        return choose_control(candidates) or entry
+
+    def save_declaration_diagnostic(self):
+        data=[]
+        focused=self.uia.GetFocusedControl()
+        if focused:
+            rect=focused.BoundingRectangle
+            data.append({"name":focused.Name,"type":"FocusedControl",
+                         "rect":[rect.left,rect.top,rect.right,rect.bottom],
+                         "cursor":self.uia.GetCursorPos()})
+        for control in self.controls():
+            rect=control.BoundingRectangle
+            if self.visible(control):
+                data.append({"name":control.Name,"type":control.ControlTypeName,
+                             "rect":[rect.left,rect.top,rect.right,rect.bottom]})
+        Path(__file__).with_name("bilibili_declaration_diagnostic.json").write_text(
+            json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
 
     def category(self, value):
         label = self.find("分区")
@@ -741,6 +889,9 @@ class BilibiliDraft:
         self.schedule(publish_at)
         self.wait_uploaded()
         submit = self.find("立即投稿")
+        self.check()
+        if getattr(self,"on_submit",None):
+            self.on_submit()
         self.click(submit)
         self.wait_name("稿件投递成功", timeout=60)
         print("稿件投递成功。", flush=True)

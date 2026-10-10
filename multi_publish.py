@@ -1,13 +1,14 @@
 """三端发布队列：保留状态，继续未完成平台，由用户删除记录。"""
 import json
 import time
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 from publish_queue import PublishQueue, WorkRows
 
-PLATFORMS = ("bilibili", "douyin", "xiaohongshu")
+PLATFORMS = ("douyin", "xiaohongshu", "bilibili")
 LABELS = {"bilibili": "B站", "douyin": "抖音", "xiaohongshu": "小红书"}
 STATE_FILE = Path(__file__).with_name("multi_publish_state.json")
 
@@ -78,6 +79,8 @@ class MultiQueue(PublishQueue):
         toolbar.pack(fill="x")
         ttk.Button(toolbar,text="批量选择作品文件夹",command=self.choose_many).pack(side="left")
         ttk.Button(toolbar,text="添加一个作品文件夹",command=self.choose_one).pack(side="left",padx=8)
+        ttk.Button(toolbar,text="全选",command=lambda:self.tree.select_all()).pack(side="left",padx=4)
+        ttk.Button(toolbar,text="取消全选",command=lambda:self.tree.select_all(False)).pack(side="left",padx=4)
         ttk.Button(toolbar,text="删除选中记录",command=self.remove).pack(side="left")
         ttk.Button(toolbar,text="核对待确认结果",command=self.review).pack(side="left",padx=8)
         self.tree=ThreeRows(panel,self.set_item_time,timezone)
@@ -177,20 +180,35 @@ class MultiQueue(PublishQueue):
                 for p in pending_platforms(item):
                     cls,prepare,cover,category,select=self.adapters[p]
                     draft=cls()
+                    previous = item["details"].get(p, {})
+                    if p == "douyin":
+                        draft.resume_stage = previous.get("stage")
+                        if previous.get("error") in (
+                            "未确认保存权限为不允许。",
+                            "没有找到“不允许”，页面或浏览器可访问性可能发生变化。",
+                        ) and not previous.get("submitted"):
+                            draft.resume_stage = "settings"
+                        draft.on_stage = lambda stage,i=item,platform=p:self.stage(i,platform,stage)
                     draft.on_tick=self.tick
                     draft.on_pause=self.pause
                     draft.on_submit=lambda i=item,platform=p:self.submitted(i,platform)
                     item["states"][p]="发布中"
                     item["details"][p]={"submitted":False}
+                    if previous.get("stage"):
+                        item["details"][p]["stage"] = previous["stage"]
+                    elif p == "douyin" and draft.resume_stage:
+                        item["details"][p]["stage"] = draft.resume_stage
                     self.tree.update_states(key,item["states"])
                     self.save_queue()
                     self.notice.set(f"正在发布 {item['folder'].name} → {LABELS[p]}")
-                    selected=select(item["date"],item["hour"]) if item["scheduled"] else None
                     try:
+                        selected=select(item["date"],item["hour"]) if item["scheduled"] else None
                         draft.run(*prepare(item["folder"]),cover(item["folder"]),category(item["folder"]),selected)
                     except Exception as error:
                         item["states"][p]="待核对" if item["details"][p]["submitted"] else "失败"
-                        item["details"][p]["error"]=str(error)
+                        error_text = str(error) or f"{type(error).__name__}：查找控件失败，详见错误位置"
+                        item["details"][p]["error"]=error_text
+                        item["details"][p]["traceback"]=traceback.format_exc()
                         self.tree.update_states(key,item["states"])
                         self.save_queue()
                         raise
@@ -200,7 +218,7 @@ class MultiQueue(PublishQueue):
                     self.save_queue()
             self.notice.set("三端全部完成，记录已保留。你可勾选后主动删除。")
         except Exception as error:
-            self.notice.set(f"流程已停止：{error}。已完成平台已保存，继续时跳过。")
+            self.notice.set(f"流程已停止：{str(error) or type(error).__name__}。已完成平台已保存，继续时跳过。")
         finally:
             self.running=False
             self.tree.set_enabled(True)
@@ -212,6 +230,10 @@ class MultiQueue(PublishQueue):
 
     def submitted(self,item,p):
         item["details"][p]["submitted"]=True
+        self.save_queue()
+
+    def stage(self,item,p,stage):
+        item["details"][p]["stage"] = stage
         self.save_queue()
 
 

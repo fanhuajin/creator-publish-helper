@@ -1,6 +1,7 @@
 """小红书作品文件夹批量发布。"""
 import json
 import time
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit
 from douyin_auto import DouyinDraft
@@ -8,6 +9,49 @@ from douyin_auto import DouyinDraft
 
 class XiaohongshuDraft(DouyinDraft):
     page_title = "小红书创作服务平台"
+
+    def keyboard_fill(self, control, field, value):
+        if field != "title":
+            return super().keyboard_fill(control,field,value)
+        current=control.GetValuePattern().Value
+        if unicodedata.normalize("NFC",current).strip() == unicodedata.normalize("NFC",value).strip():
+            return
+        hint="填写标题会有更多赞哦"
+        for _ in range(3):
+            entry=self.form_find(hint,editable=True,direction="up")
+            self.click(entry)
+            deadline=self.now()+2
+            while self.now()<deadline:
+                self.check()
+                focused=self.uia.GetFocusedControl()
+                if (focused and focused.ControlTypeName=="EditControl"
+                        and focused.Name==hint and focused.AutomationId!="RootWebArea"):
+                    self.keyboard_field("title")
+                    self.verify_edit_value(hint,value)
+                    return
+                time.sleep(0.1)
+        raise RuntimeError("小红书标题框点击后未获得输入焦点，未发送F6或输入。")
+
+    def focus_description(self, body):
+        from focus_detection import focused_field
+        for _ in range(3):
+            self.click(body)
+            try:
+                field=focused_field("xiaohongshu",self.window.NativeWindowHandle)
+            except ValueError:
+                time.sleep(0.2)
+                continue
+            if field=="description":
+                return
+            raise RuntimeError(f"小红书正文点击后焦点为{field}，未清空或输入正文。")
+        raise RuntimeError("小红书正文未获得可确认的编辑焦点，未清空或输入正文。")
+
+    def require_control(self, controls, predicate, description):
+        from bilibili_auto import choose_control
+        found = [c for c in controls if predicate(c)]
+        if not found:
+            raise RuntimeError(f"未找到小红书{description}，当前页面尚未就绪或控件布局已变化。")
+        return choose_control(found)
 
     def select_browser(self):
         windows = [w for w in self.uia.GetRootControl().GetChildren()
@@ -41,7 +85,8 @@ class XiaohongshuDraft(DouyinDraft):
 
 
     def scroll_form(self, direction, amount=5):
-        button = next(c for c in self.controls() if c.Name == "暂存离开" and self.visible(c))
+        button = self.require_control(self.controls(),
+            lambda c:c.Name == "暂存离开" and self.visible(c), "表单滚动锚点“暂存离开”")
         r = button.BoundingRectangle
         self.move_pointer((r.left-300, r.top-150))
         self.scroll_at(direction, amount)
@@ -79,8 +124,7 @@ class XiaohongshuDraft(DouyinDraft):
     def finish_cover(self):
         # 文件名出现时图片仍可能加载；等待按钮可用，并确认编辑窗口确实关闭。
         deadline = self.now() + 90
-        ready_since = None
-        last_click = 0
+        last_click = None
         while self.now() < deadline:
             self.check()
             button = self.locate("完成")
@@ -88,13 +132,10 @@ class XiaohongshuDraft(DouyinDraft):
                 return
             uploaded = self.locate("已上传封面")
             if uploaded and button.IsEnabled:
-                ready_since = ready_since or self.now()
-                if self.now()-ready_since >= 3 and self.now()-last_click >= 5:
+                if last_click is None or self.now()-last_click >= 5:
                     self.click(button)
                     last_click = self.now()
-            else:
-                ready_since = None
-            time.sleep(0.4)
+            time.sleep(0.2)
         raise RuntimeError("封面加载或保存超过90秒，已保留当前稿件。")
 
     def schedule(self, selected):
@@ -106,9 +147,10 @@ class XiaohongshuDraft(DouyinDraft):
         e = entry()
         if bool(e) != bool(selected):
             r = label.BoundingRectangle
-            toggle = next(c for c in self.controls() if c.ControlTypeName == "GroupControl" and not c.Name
+            toggle = self.require_control(self.controls(), lambda c:c.ControlTypeName == "GroupControl" and not c.Name
                           and self.visible(c) and abs(c.BoundingRectangle.top-r.top)<10
-                          and 40<c.BoundingRectangle.width()<60 and c.BoundingRectangle.left>r.right)
+                          and 40<c.BoundingRectangle.width()<60 and c.BoundingRectangle.left>r.right,
+                          "定时发布开关")
             self.click(toggle)
             time.sleep(0.4)
         if not selected:
@@ -121,8 +163,8 @@ class XiaohongshuDraft(DouyinDraft):
         from datetime import datetime, timedelta
         for _ in range(3):
             cs = self.controls()
-            year = next(c for c in cs if c.Name.endswith("年") and c.Name[:-1].isdigit() and self.visible(c))
-            month = next(c for c in cs if c.Name.endswith("月") and c.Name[:-1].isdigit() and self.visible(c))
+            year = self.require_control(cs, lambda c:c.Name.endswith("年") and c.Name[:-1].isdigit() and self.visible(c), "日历年份")
+            month = self.require_control(cs, lambda c:c.Name.endswith("月") and c.Name[:-1].isdigit() and self.visible(c), "日历月份")
             if int(year.Name[:-1]) == selected.year and int(month.Name[:-1]) == selected.month:
                 break
             buttons = [c for c in cs if self.visible(c) and c.ControlTypeName == "ButtonControl"
@@ -183,11 +225,12 @@ class XiaohongshuDraft(DouyinDraft):
         hint="填写标题会有更多赞哦"
         existing=next((c for c in self.controls() if c.Name==hint and c.ControlTypeName=="EditControl"),None)
         if existing:
-            if existing.GetValuePattern().Value != title:
-                raise RuntimeError("当前小红书稿件与队列作品不一致，请先处理当前稿件。")
+            actual_title=existing.GetValuePattern().Value
+            if unicodedata.normalize("NFC",actual_title).strip() != unicodedata.normalize("NFC",title).strip():
+                raise RuntimeError(f"当前小红书稿件与队列作品不一致：页面标题{actual_title!r}，队列标题{title!r}，未修改稿件。")
         else:
             self.next_upload()
-            upload=next(c for c in self.controls() if c.Name=="上传视频" and c.ControlTypeName=="ButtonControl" and self.visible(c))
+            upload=self.wait_name("上传视频",timeout=30)
             self.click(upload)
             self.choose_file(video)
             self.wait_name(hint, timeout=60)
@@ -198,7 +241,7 @@ class XiaohongshuDraft(DouyinDraft):
             body=next((c for c in self.controls() if self.visible(c) and c.Name.strip()==description.strip()),None)
         if body is None:
             raise RuntimeError("未找到正文编辑区。")
-        self.click(body)
+        self.focus_description(body)
         # 重启续跑时先清空已有正文，让原始提示恢复，按键助手才能明确识别字段。
         self.keys("{Ctrl}a{Back}")
         self.click(self.wait_name("输入正文描述，真诚有价值的分享予人温暖"))
@@ -211,7 +254,7 @@ class XiaohongshuDraft(DouyinDraft):
         self.schedule(publish_at)
         self.wait_uploaded()
         name="定时发布" if publish_at else "发布"
-        button=next(c for c in self.controls() if c.Name==name and c.ControlTypeName=="ButtonControl" and self.visible(c))
+        button=self.require_control(self.controls(),lambda c:c.Name==name and c.ControlTypeName=="ButtonControl" and self.visible(c),f"提交按钮“{name}”")
         self.click(button)
         deadline=self.now()+60
         while self.now()<deadline:
