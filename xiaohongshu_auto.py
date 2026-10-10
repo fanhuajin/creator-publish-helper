@@ -44,7 +44,7 @@ class XiaohongshuDraft(DouyinDraft):
         button = next(c for c in self.controls() if c.Name == "暂存离开" and self.visible(c))
         r = button.BoundingRectangle
         self.move_pointer((r.left-300, r.top-150))
-        self.desktop.scroll(direction=direction, wheel_times=amount)
+        self.scroll_at(direction, amount)
         time.sleep(0.4)
 
     def form_find(self, name, editable=False, direction="down"):
@@ -151,7 +151,7 @@ class XiaohongshuDraft(DouyinDraft):
         hour_label = self.wait_name("时")
         hr=hour_label.BoundingRectangle
         self.move_pointer((hr.left-10,hr.top+120))
-        self.desktop.scroll(direction="up",wheel_times=15)
+        self.scroll_at("up", 15)
         time.sleep(0.3)
         for _ in range(30):
             self.check()
@@ -161,7 +161,7 @@ class XiaohongshuDraft(DouyinDraft):
             if options:
                 self.click(options[0])
                 break
-            self.desktop.scroll(direction="down",wheel_times=1)
+            self.scroll_at("down", 1)
             time.sleep(0.15)
         else:
             raise RuntimeError("小时列表未找到目标小时。")

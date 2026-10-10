@@ -161,7 +161,7 @@ class DouyinDraft(BilibiliDraft):
             anchor = hours[len(hours) // 2].BoundingRectangle
             self.check()
             self.move_pointer(((anchor.left + anchor.right) // 2, (anchor.top + anchor.bottom) // 2))
-            self.desktop.scroll(direction="down", wheel_times=1)
+            self.scroll_at("down", 1)
             time.sleep(0.15)
         else:
             raise RuntimeError("未找到所选小时。")

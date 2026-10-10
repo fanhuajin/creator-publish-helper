@@ -8,6 +8,7 @@ from subprocess import CompletedProcess
 from datetime import datetime, timedelta
 
 from PIL import Image, ImageDraw
+from native_mouse import pointer_path
 
 from fill_helper import (
     candidate_stable, candidate_visible, detect_platform, read_copy,
@@ -21,6 +22,24 @@ from bilibili_auto import (
 
 
 def main():
+    start, target = (-800, 100), (1700, 900)
+    path = pointer_path(start, target)
+    assert path[-1] == target and pointer_path(target, target) == []
+    assert all(
+        (b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2 <= 14 ** 2
+        for a, b in zip([start] + path, path)
+    )
+    motion = object.__new__(BilibiliDraft)
+    motion.check = Mock()
+    motion.uia = SimpleNamespace(GetCursorPos=lambda: (0, 0))
+    with patch("bilibili_auto.mouse_event") as event, patch("bilibili_auto.time.sleep"):
+        motion.click_at((24, 0))
+        assert event.call_args_list[0].kwargs == {"position": (12, 0)}
+        assert [call.args[0] for call in event.call_args_list] == [1, 1, 2, 4]
+        event.reset_mock()
+        motion.scroll_at("down", 2)
+        assert event.call_count == 2
+        assert all(call.kwargs == {"wheel": -120} for call in event.call_args_list)
     with patch("focus_detection.subprocess.run", return_value=CompletedProcess(
         [], 0, '{"window_handle":123,"controls":[{"focused":true,"name":"作品标题"}]}', ""
     )) as probe:

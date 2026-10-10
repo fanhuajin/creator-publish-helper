@@ -20,6 +20,7 @@ from fill_helper import (
     AUTOMATION_READY, AUTOMATION_REQUEST, AUTOMATION_RESULT,
     read_copy, write_keyboard_state,
 )
+from native_mouse import mouse_event, pointer_path
 
 CHINA_TIME = timezone(timedelta(hours=8))
 
@@ -138,11 +139,9 @@ class BilibiliDraft:
         # 复用 Windows MCP 已安装的 UIA 和输入实现，无需模型/MCP客户端逐步决策。
         import pyperclip
         import windows_mcp.uia as uia
-        from windows_mcp.desktop.service import Desktop
 
         self.uia = uia
         self.clipboard = pyperclip
-        self.desktop = Desktop()
         self.window = None
         self.form_left = None
         self.copy_file = None
@@ -232,19 +231,32 @@ class BilibiliDraft:
     def move_pointer(self, target):
         """使用可见的短移动轨迹，每一步仍检查暂停及窗口状态。"""
         start = self.uia.GetCursorPos()
-        if start == target:
-            return
-        for step in range(1, 13):
+        for point in pointer_path(start, target):
             self.check()
-            fraction = step / 12
-            self.uia.SetCursorPos(round(start[0] + (target[0] - start[0]) * fraction),
-                                  round(start[1] + (target[1] - start[1]) * fraction))
-            time.sleep(0.02)
+            mouse_event(0x0001, position=point)
+            time.sleep(0.01)
 
     def click_at(self, target):
         self.check()
         self.move_pointer(target)
-        self.desktop.click(target)
+        self.check()
+        mouse_event(0x0002)  # LEFTDOWN，不附加坐标，不触发二次瞬移。
+        try:
+            time.sleep(0.04)
+        finally:
+            mouse_event(0x0004)  # LEFTUP，保证按钮释放。
+        time.sleep(0.12)
+
+    def scroll_at(self, direction, amount=1, target=None):
+        """先连续移动到滚动区域，再逐格发送滚轮事件。"""
+        if direction not in ("up", "down") or amount < 0:
+            raise ValueError("滚轮方向或次数无效。")
+        if target is not None:
+            self.move_pointer(target)
+        for _ in range(amount):
+            self.check()
+            mouse_event(0x0800, wheel=120 if direction == "up" else -120)
+            time.sleep(0.04)
 
     def page_scroll_point(self):
         rect = self.window.BoundingRectangle
@@ -281,8 +293,7 @@ class BilibiliDraft:
 
     def scroll_page(self, direction, amount):
         self.check()
-        self.move_pointer(self.page_scroll_point())
-        self.desktop.scroll(direction=direction, wheel_times=amount)
+        self.scroll_at(direction, amount, self.page_scroll_point())
         time.sleep(0.15)
 
     def input_column(self):
@@ -514,14 +525,14 @@ class BilibiliDraft:
             return
         self.click_at((self.input_column() + 100, (rect.top + rect.bottom) // 2))
         loc = (self.input_column() + 100, rect.bottom + 130)
-        self.desktop.scroll(loc=loc, direction="up", wheel_times=30)
+        self.scroll_at("up", 30, loc)
         for _ in range(16):
             option = self.locate(value)
             if option:
                 self.click(option)
                 break
             self.check()
-            self.desktop.scroll(loc=loc, direction="down", wheel_times=2)
+            self.scroll_at("down", 2, loc)
             time.sleep(0.15)
         else:
             raise RuntimeError(f"分区列表中没有找到{value}。")
@@ -688,9 +699,9 @@ class BilibiliDraft:
             anchor = options[len(options) // 2].BoundingRectangle
             visible_hours = [int(item.Name) for item in options]
             self.check()
-            self.desktop.scroll(
-                loc=((anchor.left + anchor.right) // 2, (anchor.top + anchor.bottom) // 2),
-                direction="up" if selected.hour < min(visible_hours) else "down", wheel_times=1,
+            self.scroll_at(
+                "up" if selected.hour < min(visible_hours) else "down", 1,
+                ((anchor.left + anchor.right) // 2, (anchor.top + anchor.bottom) // 2),
             )
             time.sleep(0.15)
         else:
