@@ -158,12 +158,18 @@ class BilibiliDraft:
                 raise RuntimeError("用户按下 Esc，流程已停止。")
             started = time.monotonic()
             self.on_pause()
+            # 继续按钮可能在Esc尚未松开时被点击；等待松开，避免立刻再次暂停。
+            while ctypes.windll.user32.GetAsyncKeyState(0x1B) & 0x8000:
+                if self.on_tick:
+                    self.on_tick()
+                time.sleep(0.05)
             self.paused_seconds += time.monotonic() - started
             if self.window:
                 self.window.SetFocus()
                 time.sleep(0.2)
         if self.window and self.uia.GetForegroundControl().NativeWindowHandle != self.window.NativeWindowHandle:
-            raise RuntimeError("当前窗口发生变化，流程已停止，请切回B站后重新运行。")
+            platform = getattr(self, "page_title", "B站")
+            raise RuntimeError(f"当前窗口发生变化，流程已停止，请切回{platform}后重新运行。")
 
     def now(self):
         return time.monotonic() - self.paused_seconds
@@ -240,6 +246,9 @@ class BilibiliDraft:
         self.check()
         self.move_pointer(target)
         self.check()
+        before_press = getattr(self, "before_click_press", None)
+        if before_press:
+            before_press()
         mouse_event(0x0002)  # LEFTDOWN，不附加坐标，不触发二次瞬移。
         try:
             time.sleep(0.04)
@@ -326,6 +335,12 @@ class BilibiliDraft:
             raise RuntimeError("目标控件已离开可见区域，停止输入。")
         rect = control.BoundingRectangle
         self.click_at(((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2))
+
+    def submit(self, control):
+        """最终提交入口，和设置页中的同名标签分开记录。"""
+        if not getattr(self,"tracks_submit_click",False) and getattr(self,"on_submit",None):
+            self.on_submit()
+        self.click(control)
 
     def click_declaration(self, control):
         """仅声明菜单使用实时位置检查，其他平台沿用原有点击流程。"""
@@ -668,14 +683,20 @@ class BilibiliDraft:
         if any(
             item.Name == value and self.visible(item)
             and abs(item.BoundingRectangle.top - rect.top) < 30
+            and self.input_column() <= item.BoundingRectangle.left < self.input_column()+260
             for item in self.controls()
         ):
             return
+        # 让下拉菜单有足够的可见空间，滚动点始终留在菜单内。
+        if rect.top > self.window.BoundingRectangle.bottom-450:
+            self.scroll_at("down",3)
+            label=self.find("分区")
+            rect=label.BoundingRectangle
         self.click_at((self.input_column() + 100, (rect.top + rect.bottom) // 2))
-        loc = (self.input_column() + 100, rect.bottom + 130)
+        loc = (self.input_column() + 40, rect.bottom + 80)
         self.scroll_at("up", 30, loc)
         for _ in range(16):
-            option = self.locate(value)
+            option = self.category_option(value)
             if option:
                 self.click(option)
                 break
@@ -689,9 +710,43 @@ class BilibiliDraft:
         if not any(
             item.Name == value and self.visible(item)
             and abs(item.BoundingRectangle.top - label.BoundingRectangle.top) < 30
+            and self.input_column() <= item.BoundingRectangle.left < self.input_column()+260
             for item in self.controls()
         ):
             raise RuntimeError(f"未确认{value}分区。")
+
+    def category_option(self, value):
+        """仅查分区菜单选项，排除页面标题、已选值及推荐文字。"""
+        found = []
+        controls=self.controls()
+        label=choose_control([c for c in controls if c.Name=="分区" and self.visible(c)])
+        rect=label.BoundingRectangle if label else None
+        left=self.input_column() if label else None
+        menu_names={"音乐","舞蹈","动画","绘画","娱乐","游戏","知识","科技","运动","汽车","美食","生活","影视","时尚","动物圈","亲子","健康","情感","vlog"}
+        menu=[c for c in controls if rect and c.Name in menu_names and self.visible(c)
+              and left<=c.BoundingRectangle.left<left+260
+              and rect.bottom+10<c.BoundingRectangle.top<rect.bottom+400]
+        for item in controls:
+            if item.Name != value or not self.visible(item):
+                continue
+            if len({c.Name for c in menu})>=3 and item in menu:
+                found.append(item)
+                continue
+            node = getattr(item, "control", item)
+            for _ in range(8):
+                if node is None:
+                    break
+                role = node.ControlTypeName
+                class_name = getattr(node, "ClassName", "").lower()
+                if role in ("ListItemControl", "MenuItemControl") or any(
+                    marker in class_name for marker in ("dropdown", "cascader-menu", "select-item", "select-option")
+                ):
+                    found.append(item)
+                    break
+                if role in ("DocumentControl", "WindowControl"):
+                    break
+                node = node.GetParentControl()
+        return choose_control(found)
 
     def wait_uploaded(self):
         deadline = self.now() + 180
@@ -817,56 +872,38 @@ class BilibiliDraft:
         else:
             raise RuntimeError("日历月份不符合所选日期。")
         rect = header.BoundingRectangle
-        day = choose_control([
+        days = [
             item for item in self.controls()
-            if item.Name == str(selected.day) and self.visible(item)
+            if item.Name.isdigit() and self.visible(item)
             and rect.top + 45 < item.BoundingRectangle.top < rect.top + 240
             and rect.left - 130 < item.BoundingRectangle.left < rect.right + 130
-        ])
-        if day is None:
-            raise RuntimeError("所选日期没有可点击的日历项。")
-        self.click(day)
+        ]
+        from schedule_controls import month_calendar_day, scroll_select, wait_hour_readback
+        self.click(month_calendar_day(days,selected.year,selected.month,selected.day,"B站"))
         _, clock = self.schedule_fields()
         self.click(clock)
         clock_rect = clock.BoundingRectangle
-        value = f"{selected.hour:02d}"
         # 用户仅指定小时，保留页面当前分钟；不再滚动分钟列。
-        for _ in range(30):
-            options = [
+        def hours():
+            return [
                 item for item in self.controls()
                 if self.visible(item) and re.fullmatch(r"\d{2}", item.Name)
                 and clock_rect.top - 245 < item.BoundingRectangle.top < clock_rect.top - 15
                 and abs((item.BoundingRectangle.left + item.BoundingRectangle.right) / 2 - (clock_rect.left + 15)) < 25
             ]
-            option = choose_control([item for item in options if item.Name == value])
-            if option:
-                self.click(option)
-                break
-            if not options:
-                raise RuntimeError("小时列表未确认可见，已停止滚动，避免滚动整个页面。")
-            anchor = options[len(options) // 2].BoundingRectangle
-            visible_hours = [int(item.Name) for item in options]
-            self.check()
-            self.scroll_at(
-                "up" if selected.hour < min(visible_hours) else "down", 1,
-                ((anchor.left + anchor.right) // 2, (anchor.top + anchor.bottom) // 2),
-            )
-            time.sleep(0.15)
-        else:
-            raise RuntimeError(f"没有找到小时选项{value}。")
+        scroll_select(self,hours,selected.hour,"B站小时")
         self.click(self.find("定时发布"))
-        date, clock = self.schedule_fields()
-        if date is None or clock is None or (
-            date.Name != selected.strftime("%Y-%m-%d")
-            or not re.fullmatch(r"\d{2}:\d{2}", clock.Name)
-            or clock.Name.split(":")[0] != selected.strftime("%H")
-        ):
-            raise RuntimeError("定时发布结果与所选日期和小时不一致。")
-        actual = parse_publish_time(f"{date.Name} {clock.Name}", require_five_minutes=False)
+        def value():
+            date,clock=self.schedule_fields()
+            return f"{date.Name} {clock.Name}" if date and clock else None
+        selected_actual=wait_hour_readback(self,value,selected,"B站")
+        actual = parse_publish_time(selected_actual.strftime("%Y-%m-%d %H:%M"), require_five_minutes=False)
         self.actual_publish_at = actual
         print(f"定时已核对：{actual:%Y-%m-%d %H:%M} 北京时间（保留页面分钟）。", flush=True)
 
     def run(self, video, title, description, tags, cover, category, publish_at):
+        stage = getattr(self, "on_stage", None) or (lambda value: None)
+        stage("entry")
         self.select_browser()
         if self.locate("再投一个"):
             self.next_upload()
@@ -877,22 +914,30 @@ class BilibiliDraft:
         self.wait_name("请输入稿件标题", timeout=30)
         print("投稿表单已出现，视频上传期间开始填写。", flush=True)
         self.input_column()
+        stage("cover")
         self.cover(cover)
+        stage("title")
         self.keyboard_fill(self.find("请输入稿件标题", editable=True), "title", title)
         print("标题已核对。", flush=True)
+        stage("declaration")
         self.declaration()
+        stage("category")
         self.category(category)
+        stage("tags")
         if self.fill_tags(tags):
             print("标签已确认。", flush=True)
+        stage("description")
         self.description(description)
         print("简介已核对。", flush=True)
+        stage("schedule")
         self.schedule(publish_at)
+        stage("upload_ready")
         self.wait_uploaded()
+        stage("submit_ready")
         submit = self.find("立即投稿")
         self.check()
-        if getattr(self,"on_submit",None):
-            self.on_submit()
-        self.click(submit)
+        self.submit(submit)
+        stage("confirm_result")
         self.wait_name("稿件投递成功", timeout=60)
         print("稿件投递成功。", flush=True)
 

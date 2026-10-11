@@ -6,6 +6,27 @@ from xiaohongshu_auto import XiaohongshuDraft
 
 
 class ControlsTests(unittest.TestCase):
+    def test_declaration_menu_text_is_not_mistaken_for_saved_value(self):
+        draft=object.__new__(XiaohongshuDraft)
+        label=SimpleNamespace(BoundingRectangle=SimpleNamespace(left=100,top=100,right=600,bottom=156))
+        menu=SimpleNamespace(Name="笔记含AI合成内容",BoundingRectangle=SimpleNamespace(left=120,top=200,right=300,bottom=230))
+        saved=SimpleNamespace(Name="笔记含AI合成内容",BoundingRectangle=SimpleNamespace(left=120,top=110,right=300,bottom=135))
+        draft.form_find=lambda name:label;draft.locate=lambda name:label
+        draft.controls=Mock(side_effect=[[menu],[saved]])
+        draft.visible=lambda c:True;draft.wait_name=lambda name:menu
+        draft.click=Mock();draft.check=Mock();draft.now=Mock(side_effect=[0,1])
+        draft.set_declaration()
+        self.assertEqual(draft.click.call_count,2)
+
+    def test_saved_declaration_is_not_selected_again(self):
+        draft=object.__new__(XiaohongshuDraft)
+        label=SimpleNamespace(BoundingRectangle=SimpleNamespace(left=100,top=100,right=600,bottom=156))
+        saved=SimpleNamespace(Name="笔记含AI合成内容",BoundingRectangle=SimpleNamespace(left=120,top=110,right=300,bottom=135))
+        draft.form_find=lambda name:label;draft.locate=lambda name:label;draft.controls=lambda:[saved]
+        draft.visible=lambda c:True;draft.click=Mock()
+        draft.set_declaration()
+        draft.click.assert_not_called()
+
     def test_correct_title_skips_f6(self):
         draft=object.__new__(XiaohongshuDraft)
         control=SimpleNamespace(GetValuePattern=lambda:SimpleNamespace(Value="早上好～ "))

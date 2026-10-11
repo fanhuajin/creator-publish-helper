@@ -122,7 +122,12 @@ class DouyinDraft(BilibiliDraft):
         self.click(self.find("请选择自主声明"))
         self.click(self.wait_name("内容由AI生成"))
         self.click(self.find("确定"))
-        self.wait_name("内容由AI生成")
+        deadline=self.now()+5
+        while self.now()<deadline:
+            if self.locate("内容由AI生成") and self.locate("确定") is None:
+                return
+            time.sleep(0.15)
+        raise RuntimeError("未确认抖音AI声明保存并关闭弹窗，未继续发布。")
 
     def disable_saving(self):
         self.select_option("不允许")
@@ -167,11 +172,14 @@ class DouyinDraft(BilibiliDraft):
             raise ValueError("抖音定时应在北京时间2小时后、14天内。")
         self.select_option("定时发布")
         entry = self.find("日期和时间", editable=True)
+        stage=getattr(self,"on_stage",None) or (lambda value:None)
+        stage("schedule_calendar")
         self.click(entry)
+        from schedule_controls import wait_candidates
         # 日历节点必须可见，按所属日历区域定位日期。
         for _ in range(2):
-            headers = [c for c in self.controls() if self.visible(c)
-                       and re.fullmatch(r"\d{4}年\s*\d{1,2}月", c.Name)]
+            headers = wait_candidates(self,lambda:[c for c in self.controls() if self.visible(c)
+                       and re.fullmatch(r"\d{4}年\s*\d{1,2}月", c.Name)],"抖音日历")
             from bilibili_auto import choose_control
             header = choose_control(headers)
             if header is None:
@@ -186,39 +194,23 @@ class DouyinDraft(BilibiliDraft):
         else:
             raise RuntimeError("日历月份与所选月份不一致。")
         r = header.BoundingRectangle
-        days = [c for c in self.controls() if self.visible(c) and c.Name == str(selected.day)
-                and r.top + 70 < c.BoundingRectangle.top < r.top + 360
-                and r.left - 120 < c.BoundingRectangle.left < r.right + 120]
-        self.click(choose_control(days)) if days else self.fail_calendar_day()
+        from douyin_schedule import find_calendar_day
+        from schedule_controls import scroll_select, wait_hour_readback
+        stage("schedule_date")
+        self.click(find_calendar_day(self,header,selected))
         clocks = [c for c in self.controls() if self.visible(c)
                   and c.ControlTypeName == "TextControl" and re.fullmatch(r"\d{2}:\d{2}", c.Name)
                   and r.left - 150 < c.BoundingRectangle.left < r.right + 180]
         clock = choose_control(clocks)
         if clock is None:
             raise RuntimeError("未确认小时选择入口。")
+        stage("schedule_hour")
         self.click(clock)
         clock_rect = clock.BoundingRectangle
-        for _ in range(40):
-            hours = self.hour_options(clock_rect)
-            if not hours:
-                raise RuntimeError("未确认小时滚动列表，停止操作以免滚动整页。")
-            target = choose_control([c for c in hours if int(c.Name.removesuffix("时")) == selected.hour])
-            if target:
-                self.click(target)
-                break
-            anchor = hours[len(hours) // 2].BoundingRectangle
-            self.check()
-            self.move_pointer(((anchor.left + anchor.right) // 2, (anchor.top + anchor.bottom) // 2))
-            first_hour = min(int(c.Name.removesuffix("时")) for c in hours)
-            self.scroll_at("up" if selected.hour < first_hour else "down", 1)
-            time.sleep(0.15)
-        else:
-            raise RuntimeError("未找到所选小时。")
+        scroll_select(self,lambda:self.hour_options(clock_rect),selected.hour,"抖音小时")
         self.click(self.find("发布时间"))
-        actual = self.find("日期和时间", editable=True).GetValuePattern().Value
-        parsed = datetime.strptime(actual, "%Y-%m-%d %H:%M").replace(tzinfo=CHINA_TIME)
-        if parsed.date() != selected.date() or parsed.hour != selected.hour:
-            raise RuntimeError(f"抖音日期或小时回读不一致：目标 {selected:%Y-%m-%d %H}点，页面 {actual}，未发布。")
+        stage("schedule_readback")
+        parsed = wait_hour_readback(self,lambda:self.find("日期和时间",editable=True).GetValuePattern().Value,selected,"抖音")
         if not datetime.now(CHINA_TIME) + timedelta(hours=2) <= parsed <= datetime.now(CHINA_TIME) + timedelta(days=14):
             raise RuntimeError("所选日期和小时超出抖音允许的定时范围。")
         self.actual_publish_at = parsed
@@ -230,6 +222,8 @@ class DouyinDraft(BilibiliDraft):
                    and re.fullmatch(r"\d{2}(?:时)?", c.Name)
                    and clock_rect.top-415 < c.BoundingRectangle.top < clock_rect.top-45
                    and clock_rect.left-400 < c.BoundingRectangle.left < clock_rect.right+100]
+        if not options:
+            return []
         columns = []
         for control in sorted(options,key=lambda c:c.BoundingRectangle.left):
             x = control.BoundingRectangle.left
@@ -288,6 +282,8 @@ class DouyinDraft(BilibiliDraft):
         raise RuntimeError("视频上传等待超时。")
 
     def run(self, video, title, description, tags, covers, category, publish_at):
+        stage=getattr(self,"on_stage",None) or (lambda value:None)
+        stage("entry")
         self.select_browser()
         hint = "填写作品标题，为作品获得更多流量"
         existing = self.locate(hint, editable=True)
@@ -305,6 +301,7 @@ class DouyinDraft(BilibiliDraft):
             self.upload(video)
         self.wait_name(hint, timeout=30)
         self.start_keyboard_helper(video.parent / "发布文案.txt")
+        stage("title")
         self.keyboard_fill(self.find(hint, editable=True), "title", title)
         body = self.locate("添加作品简介")
         if not body:
@@ -312,11 +309,14 @@ class DouyinDraft(BilibiliDraft):
                          and c.ControlTypeName == "TextControl" and c.Name.strip() == description), None)
         if body is None:
             raise RuntimeError("未找到作品简介编辑区。")
+        stage("description")
         self.click(body)
         self.keyboard_field("description")
+        stage("cover")
         self.vertical_cover(covers[0])
         self.horizontal_cover(covers[1])
         self.wait_name("封面效果检测通过", timeout=60)
+        stage("declaration")
         self.declaration()
         if getattr(self, "on_stage", None):
             self.on_stage("settings")
@@ -324,9 +324,18 @@ class DouyinDraft(BilibiliDraft):
 
     def finish_publish(self, title, publish_at):
         hint = "填写作品标题，为作品获得更多流量"
+        stage = getattr(self, "on_stage", None)
+        if stage:
+            stage("schedule")
         self.schedule(publish_at)
+        if stage:
+            stage("upload_ready")
         self.wait_uploaded()
-        self.click(self.find("发布"))
+        if stage:
+            stage("submit_ready")
+        self.submit(self.find("发布"))
+        if stage:
+            stage("confirm_result")
         deadline = self.now() + 60
         while self.now() < deadline:
             controls = self.controls()

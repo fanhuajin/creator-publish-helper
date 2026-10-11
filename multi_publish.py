@@ -1,5 +1,6 @@
 """三端发布队列：保留状态，继续未完成平台，由用户删除记录。"""
 import json
+import re
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -23,6 +24,7 @@ def recover_item(item):
     item.setdefault("states", {p: "待发布" for p in PLATFORMS})
     item.setdefault("details", {})
     for p in PLATFORMS:
+        item["states"].setdefault(p,"待发布")
         if item["states"].get(p) == "发布中":
             item["states"][p] = "待核对" if item["details"].get(p, {}).get("submitted") else "失败"
     return item
@@ -32,27 +34,89 @@ def pending_platforms(item):
     return [p for p in PLATFORMS if item["states"][p] in ("待发布", "失败")]
 
 
+def mark_manual_completed(item, platform, completed_at):
+    previous = dict(item.setdefault("details", {}).get(platform, {}))
+    item["states"][platform] = "已完成"
+    item["details"][platform] = {
+        "submitted": True, "manual": True, "completed_at": completed_at,
+        "requested_mode": "定时" if item.get("scheduled") else "立即发布",
+        "requested_time": f"{item['date']} {item['hour']}:00" if item.get("scheduled") else None,
+        # 用户确认完成不等于确认页面的实际日期、小时及分钟。
+        "publish_at": previous.get("publish_at"),
+        "publish_time_verified": bool(previous.get("publish_at")),
+        "previous_attempt": previous,
+    }
+
+
 class ThreeRows(WorkRows):
-    def __init__(self, parent, change, timezone):
+    def __init__(self, parent, change, timezone, state_change):
         super().__init__(parent, change, timezone)
+        self.state_change=state_change
         header = self.winfo_children()[0]
         header.winfo_children()[-1].destroy()
+        header.configure(padding=(0,4))
+        for widget in header.winfo_children():
+            widget.configure(style="Heading.TLabel")
         for p in PLATFORMS:
-            ttk.Label(header, text=LABELS[p], width=12).pack(side="left")
+            ttk.Label(header, text=LABELS[p], width=12,style="Heading.TLabel").pack(side="left")
+        self.column_header=header
+        header.pack_configure(fill="x")
+        self.canvas.bind("<Configure>",self.align_header,add="+")
+        self.canvas.configure(background="#f7f7f7")
+        self.canvas.bind("<MouseWheel>",self.wheel)
+        self.body.bind("<MouseWheel>",self.wheel)
+
+    def align_header(self,event=None):
+        if not self.rows:
+            return
+        self.update_idletasks()
+        row=next(iter(self.rows.values()))
+        widgets=row["frame"].winfo_children()
+        columns=[widgets[0],widgets[1],row["date_box"],row["hour_box"]]+[row["platform_boxes"][p] for p in PLATFORMS]
+        for label,control in zip(self.column_header.winfo_children(),columns):
+            label.pack_forget()
+            label.place(x=control.winfo_x(),y=0,width=control.winfo_width(),height=24)
+            label.configure(anchor="w")
+        self.column_header.configure(height=24)
+
+    def wheel(self,event):
+        self.canvas.yview_scroll(-int(event.delta/120),"units")
+        return "break"
 
     def insert(self, parent, position, iid, text, values):
-        super().insert(parent, position, iid, text, values)
+        display=re.sub(r"_\d{10,}$","",text).replace("_跳舞_"," · ").replace("_唱歌_"," · ")
+        super().insert(parent, position, iid, display, values)
         row = self.rows[iid]
+        row["frame"].configure(padding=(0,3))
+        row["frame"].bind("<MouseWheel>",self.wheel)
+        for widget in row["frame"].winfo_children():
+            if not isinstance(widget,ttk.Combobox):
+                widget.bind("<MouseWheel>",self.wheel)
         row["frame"].winfo_children()[-1].destroy()
         row["platforms"] = {}
+        row["platform_boxes"] = {}
         for p in PLATFORMS:
             var = tk.StringVar(value="待发布")
             row["platforms"][p] = var
-            ttk.Label(row["frame"], textvariable=var, width=12).pack(side="left", padx=4)
+            box=ttk.Combobox(row["frame"],textvariable=var,values=("待发布","不发布"),state="readonly",width=10)
+            box.pack(side="left",padx=4)
+            box.bind("<<ComboboxSelected>>",lambda event,key=iid,platform=p,variable=var:self.state_change(key,platform,variable.get()))
+            box.bind("<Double-Button-1>",lambda event,key=iid,platform=p:self.state_change(key,platform,"核对"))
+            row["platform_boxes"][p]=box
+        self.after_idle(self.align_header)
 
     def update_states(self, key, states):
         for p, var in self.rows[key]["platforms"].items():
             var.set(states[p])
+            box=self.rows[key]["platform_boxes"][p]
+            box.configure(style={"已完成":"Done.TCombobox","不发布":"Skip.TCombobox","失败":"Error.TCombobox","待核对":"Error.TCombobox"}.get(states[p],"TCombobox"))
+            box.configure(state="disabled" if states[p] in ("已完成","待核对","发布中") else "readonly")
+
+    def set_enabled(self, enabled):
+        super().set_enabled(enabled)
+        for row in self.rows.values():
+            for p,box in row["platform_boxes"].items():
+                box.configure(state="readonly" if enabled and row["platforms"][p].get() not in ("已完成","待核对","发布中") else "disabled")
 
 
 class MultiQueue(PublishQueue):
@@ -67,28 +131,40 @@ class MultiQueue(PublishQueue):
         self.date = tk.StringVar(value=tomorrow.strftime("%Y-%m-%d"))
         self.hour = tk.StringVar(value="01")
         self.scheduled = tk.BooleanVar(value=True)
-        self.notice = tk.StringVar(value="选择作品文件夹，设置共用日期和小时。三端完成后保留记录，由你主动删除。")
+        self.notice = tk.StringVar(value="选择作品文件夹，设置日期和小时。可单独运行一端，三端完成后保留记录。")
         root.title("三端批量发布")
+        from publish_style import apply_theme
+        apply_theme(root)
         icon=Path(__file__).with_name("assets")/"creator-publish.ico"
         if icon.exists():
             root.iconbitmap(str(icon))
-        root.geometry("1250x650")
-        panel = ttk.Frame(root, padding=16)
+        root.geometry("1000x630")
+        root.minsize(920,560)
+        panel = ttk.Frame(root, padding=12,style="Page.TFrame")
         panel.pack(fill="both", expand=True)
+        self.summary=tk.StringVar(value="整理作品，安排时间，一次完成三端发布")
         toolbar = ttk.Frame(panel)
         toolbar.pack(fill="x")
-        ttk.Button(toolbar,text="批量选择作品文件夹",command=self.choose_many).pack(side="left")
-        ttk.Button(toolbar,text="添加一个作品文件夹",command=self.choose_one).pack(side="left",padx=8)
+        ttk.Button(toolbar,text="批量添加作品",command=self.choose_many,style="Primary.TButton").pack(side="left")
+        ttk.Button(toolbar,text="添加单个作品",command=self.choose_one).pack(side="left",padx=8)
         ttk.Button(toolbar,text="全选",command=lambda:self.tree.select_all()).pack(side="left",padx=4)
         ttk.Button(toolbar,text="取消全选",command=lambda:self.tree.select_all(False)).pack(side="left",padx=4)
-        ttk.Button(toolbar,text="删除选中记录",command=self.remove).pack(side="left")
-        ttk.Button(toolbar,text="核对待确认结果",command=self.review).pack(side="left",padx=8)
-        self.tree=ThreeRows(panel,self.set_item_time,timezone)
-        self.tree.pack(fill="both",expand=True,pady=14)
-        ttk.Label(panel,textvariable=self.notice,wraplength=1180).pack(anchor="w",pady=12)
-        ttk.Label(panel,text="Esc 暂停；继续只处理未完成的平台。删除记录不会删除素材文件夹。").pack(anchor="w")
-        self.start_button=ttk.Button(panel,text="开始 / 继续三端发布",command=self.start)
-        self.start_button.pack(anchor="e",pady=10)
+        ttk.Button(toolbar,text="删除选中记录",command=self.remove,style="Danger.TButton").pack(side="right")
+        card=ttk.Frame(panel)
+        card.pack(fill="both",expand=True,pady=(10,8))
+        self.tree=ThreeRows(card,self.set_item_time,timezone,self.set_platform_state)
+        self.tree.pack(fill="both",expand=True)
+        ttk.Label(panel,textvariable=self.notice,wraplength=1180,style="Subtitle.TLabel").pack(anchor="w",pady=(0,6))
+        ttk.Label(panel,text="状态选择“不发布”即可跳过对应平台  ·  Esc 暂停  ·  已完成作品自动跳过",style="Subtitle.TLabel").pack(anchor="w")
+        actions=ttk.Frame(panel)
+        actions.pack(fill="x",pady=(10,0))
+        self.platform_buttons={}
+        for p in PLATFORMS:
+            button=ttk.Button(actions,text=f"只运行{LABELS[p]}",command=lambda platform=p:self.start(platform))
+            button.pack(side="left",padx=4)
+            self.platform_buttons[p]=button
+        self.start_button=ttk.Button(actions,text="开始 / 继续三端发布",command=self.start,style="Primary.TButton")
+        self.start_button.pack(side="right")
         root.protocol("WM_DELETE_WINDOW",self.close)
         root.bind("<Escape>",lambda event:self.request_pause())
         self.restore_queue()
@@ -107,13 +183,37 @@ class MultiQueue(PublishQueue):
         self.save_queue()
 
     def validate(self, folder):
-        for p, adapter in self.adapters.items():
-            adapter[1](folder)
-            adapter[2](folder)
-            adapter[3](folder)
+        # 添加时只检查共用视频/文案，各端限制留到该端开始前检查。
+        # 例如小红书标题过长，不能阻止用户单独发布B站。
+        from bilibili_auto import prepare_files
+        prepare_files(folder)
+
+    def set_platform_state(self,key,platform,value):
+        item=self.items[key]
+        if value=="核对" and not self.running and item["states"][platform]=="待核对":
+            answer=messagebox.askyesnocancel("核对发布结果",f"请核对{LABELS[platform]}《{item['folder'].name}》。\n已发布成功选“是”；确认未发布选“否”；未确认选“取消”。",parent=self.root)
+            if answer is not None:
+                previous=dict(item["details"].get(platform,{}))
+                item["states"][platform]="已完成" if answer else "待发布"
+                item["details"][platform]={"manual_review":True,"submitted":bool(answer),"previous_attempt":previous}
+                self.tree.update_states(key,item["states"])
+                self.save_queue()
+            return
+        if (self.running or value not in ("待发布","不发布")
+                or item["states"][platform] in ("已完成","待核对","发布中")):
+            self.tree.update_states(key,item["states"])
+            return
+        item["states"][platform]=value
+        self.tree.update_states(key,item["states"])
+        self.save_queue()
+        self.notice.set(f"《{item['folder'].name}》{LABELS[platform]}：{value}。")
 
     def save_queue(self):
-        if not self.loading:
+        if hasattr(self,"summary"):
+            total=len(self.items)
+            done=sum(all(s in ("已完成","不发布") for s in i["states"].values()) for i in self.items.values())
+            self.summary.set(f"{total} 个作品  ·  {done} 个已处理  ·  {total-done} 个待处理")
+        if not self.loading and not getattr(self,"state_read_failed",False):
             save_state(self.queue_file,{"directory":self.directory,
                        "items":[dict(i,folder=str(i["folder"])) for i in self.items.values()]})
 
@@ -121,6 +221,8 @@ class MultiQueue(PublishQueue):
         if not self.queue_file.exists():
             return
         self.loading=True
+        restored=False
+        self.state_read_failed=False
         try:
             state=json.loads(self.queue_file.read_text(encoding="utf-8"))
             self.directory=state.get("directory",self.directory)
@@ -132,11 +234,27 @@ class MultiQueue(PublishQueue):
                 self.tree.insert("","end",iid=key,text=item["folder"].name,values=self.values(item))
                 self.tree.update_states(key,item["states"])
             self.notice.set(f"已恢复 {len(self.items)} 条记录；已完成平台会跳过。")
+            restored=True
         except Exception as error:
+            self.state_read_failed=True
             self.notice.set(f"读取列表失败：{error}")
         finally:
             self.loading=False
+        if restored:
+            self.save_queue()
+
+    def manual_completed(self, platform):
+        if self.running:
+            return
+        keys = self.tree.selection()
+        for key in keys:
+            item = self.items[key]
+            if item["states"][platform] == "已完成":
+                continue
+            mark_manual_completed(item, platform, datetime.now(self.timezone).isoformat(timespec="seconds"))
+            self.tree.update_states(key, item["states"])
         self.save_queue()
+        self.notice.set(f"已将选中的 {len(keys)} 条{LABELS[platform]}记录标记为手动完成，继续时会跳过。")
 
     def review(self):
         if self.running:
@@ -151,19 +269,32 @@ class MultiQueue(PublishQueue):
                 if answer is None:
                     continue
                 item["states"][p]="已完成" if answer else "待发布"
-                item["details"][p]={"manual_review":True,"submitted":bool(answer)}
+                previous=dict(item["details"].get(p,{}))
+                item["details"][p]={"manual_review":True,"submitted":bool(answer),"previous_attempt":previous}
                 self.tree.update_states(key,item["states"])
                 self.save_queue()
 
-    def start(self):
+    def start(self, platform=None):
         if self.running or not self.items:
             return
-        if any("待核对" in i["states"].values() for i in self.items.values()):
-            self.notice.set("请先勾选待核对作品，点击“核对待确认结果”，确认是否已发布。")
+        if platform is not None and platform not in PLATFORMS:
+            raise ValueError(f"未知发布平台：{platform}")
+        platforms=(platform,) if platform else PLATFORMS
+        label=LABELS[platform] if platform else "三端"
+        if getattr(self,"state_read_failed",False):
+            self.notice.set("队列文件未完整读取，请修复后重新打开，当前记录不会覆盖原文件。")
+            return
+        if any(i["states"][p]=="待核对" for i in self.items.values() for p in platforms):
+            self.notice.set(f"{label}有待核对作品，请双击该平台的“待核对”状态确认是否已发布。其他端可单独运行。")
+            return
+        if not any(p in pending_platforms(i) for i in self.items.values() for p in platforms):
+            self.notice.set(f"{label}没有待发布记录，已完成作品会跳过。")
             return
         try:
             for item in self.items.values():
-                for p in pending_platforms(item):
+                for p in platforms:
+                    if p not in pending_platforms(item):
+                        continue
                     _,prepare,cover,category,select=self.adapters[p]
                     prepare(item["folder"]); cover(item["folder"]); category(item["folder"])
                     if item["scheduled"]:
@@ -174,72 +305,114 @@ class MultiQueue(PublishQueue):
         self.running=True
         self.tree.set_enabled(False)
         self.start_button.configure(text="运行中",state="disabled")
+        for button in getattr(self,"platform_buttons",{}).values():
+            button.configure(state="disabled")
         self.root.withdraw()
         try:
-            for key,item in self.items.items():
-                for p in pending_platforms(item):
-                    cls,prepare,cover,category,select=self.adapters[p]
-                    draft=cls()
-                    previous = item["details"].get(p, {})
-                    if p == "douyin":
-                        draft.resume_stage = previous.get("stage")
-                        if previous.get("error") in (
-                            "未确认保存权限为不允许。",
-                            "没有找到“不允许”，页面或浏览器可访问性可能发生变化。",
-                        ) and not previous.get("submitted"):
-                            draft.resume_stage = "settings"
-                        draft.on_stage = lambda stage,i=item,platform=p:self.stage(i,platform,stage)
-                    draft.on_tick=self.tick
-                    draft.on_pause=self.pause
-                    draft.on_submit=lambda i=item,platform=p:self.submitted(i,platform)
-                    item["states"][p]="发布中"
-                    item["details"][p]={"submitted":False}
-                    if previous.get("stage"):
-                        item["details"][p]["stage"] = previous["stage"]
-                    elif p == "douyin" and draft.resume_stage:
-                        item["details"][p]["stage"] = draft.resume_stage
-                    self.tree.update_states(key,item["states"])
-                    self.save_queue()
-                    self.notice.set(f"正在发布 {item['folder'].name} → {LABELS[p]}")
-                    try:
-                        selected=select(item["date"],item["hour"]) if item["scheduled"] else None
-                        draft.run(*prepare(item["folder"]),cover(item["folder"]),category(item["folder"]),selected)
-                    except Exception as error:
-                        item["states"][p]="待核对" if item["details"][p]["submitted"] else "失败"
-                        error_text = str(error) or f"{type(error).__name__}：查找控件失败，详见错误位置"
-                        item["details"][p]["error"]=error_text
-                        item["details"][p]["traceback"]=traceback.format_exc()
-                        self.tree.update_states(key,item["states"])
-                        self.save_queue()
-                        raise
-                    item["states"][p]="已完成"
-                    item["details"][p]["publish_at"]=str(getattr(draft,"actual_publish_at",selected) or "不定时")
-                    self.tree.update_states(key,item["states"])
-                    self.save_queue()
-            self.notice.set("三端全部完成，记录已保留。你可勾选后主动删除。")
+            # 一端处理完再切换，减少每条作品在三张网页间切换。
+            for p in platforms:
+                for key,item in self.items.items():
+                    if p in pending_platforms(item):
+                        self.run_platform(key,item,p)
+            self.notice.set(f"{label}全部完成，记录已保留。你可勾选后主动删除。")
         except Exception as error:
-            self.notice.set(f"流程已停止：{str(error) or type(error).__name__}。已完成平台已保存，继续时跳过。")
+            self.notice.set(f"{label}流程已停止：{str(error) or type(error).__name__}。记录已保存，可单独运行其他端。")
         finally:
             self.running=False
             self.tree.set_enabled(True)
             self.start_button.configure(text="开始 / 继续三端发布",state="normal",command=self.start)
+            for button in getattr(self,"platform_buttons",{}).values():
+                button.configure(state="normal")
             if not self.closed:
                 self.root.deiconify(); self.root.lift()
             else:
                 self.root.quit()
 
+    def run_platform(self, key, item, platform):
+        """只更新本端状态，初始化、选择时间和网页失败都保存到本端历史。"""
+        cls,prepare,cover,category,select=self.adapters[platform]
+        previous=item["details"].get(platform,{})
+        detail={"submitted":False}
+        if previous:
+            history=list(previous.get("attempts",[]))
+            history.append({k:v for k,v in previous.items() if k!="attempts"})
+            detail["attempts"]=history
+        if previous.get("stage"):
+            detail["stage"]=previous["stage"]
+        item["details"][platform]=detail
+        item["states"][platform]="发布中"
+        self.tree.update_states(key,item["states"])
+        self.save_queue()
+        self.notice.set(f"正在发布 {item['folder'].name} → {LABELS[platform]}")
+        try:
+            draft=cls()
+            if platform=="douyin":
+                draft.resume_stage=previous.get("stage")
+                if not previous.get("submitted") and (
+                    draft.resume_stage in ("schedule","upload_ready","submit_ready")
+                    or (draft.resume_stage or "").startswith("schedule_")
+                    or previous.get("error") in (
+                        "未确认保存权限为不允许。",
+                        "没有找到“不允许”，页面或浏览器可访问性可能发生变化。",
+                    )
+                ):
+                    draft.resume_stage="settings"
+                if not detail.get("stage") and draft.resume_stage:
+                    detail["stage"]=draft.resume_stage
+            draft.on_tick=self.tick
+            draft.on_stage=lambda stage:self.stage(item,platform,stage)
+            draft.on_pause=lambda:self.pause_platform(item,platform)
+            draft.on_submit=lambda:self.submitted(item,platform)
+            selected=select(item["date"],item["hour"]) if item["scheduled"] else None
+            detail["requested_mode"]="定时" if selected else "立即发布"
+            detail["requested_time"]=str(selected) if selected else None
+            self.save_queue()
+            draft.run(*prepare(item["folder"]),cover(item["folder"]),category(item["folder"]),selected)
+        except Exception as error:
+            item["states"][platform]="待核对" if detail["submitted"] else "失败"
+            detail["error"]=str(error) or f"{type(error).__name__}：查找控件失败，详见错误位置"
+            detail["traceback"]=traceback.format_exc()
+            self.tree.update_states(key,item["states"])
+            self.save_queue()
+            raise
+        item["states"][platform]="已完成"
+        detail["publish_at"]=str(getattr(draft,"actual_publish_at",selected) or "不定时")
+        self.tree.update_states(key,item["states"])
+        self.save_queue()
+
     def submitted(self,item,p):
         item["details"][p]["submitted"]=True
+        item["details"][p]["submitted_at"] = datetime.now(self.timezone).isoformat(timespec="seconds")
         self.save_queue()
 
     def stage(self,item,p,stage):
         item["details"][p]["stage"] = stage
+        item["details"][p]["stage_at"] = datetime.now(self.timezone).isoformat(timespec="seconds")
         self.save_queue()
+
+    def pause_platform(self, item, platform):
+        detail = item["details"][platform]
+        detail["paused"] = True
+        detail["paused_at"] = datetime.now(self.timezone).isoformat(timespec="seconds")
+        self.save_queue()
+        try:
+            self.pause()
+        finally:
+            detail["paused"] = False
+            self.save_queue()
 
 
 class SubmissionTracking:
+    tracks_submit_click=True
     on_submit=None
     tab_hint=""
+
+    def submit(self, control):
+        self.submission_requested=True
+        try:
+            self.click(control)
+        finally:
+            self.submission_requested=False
 
     def select_browser(self):
         candidates=[]
@@ -262,11 +435,30 @@ class SubmissionTracking:
         return super().select_browser()
 
     def click(self, control):
-        if control and control.ControlTypeName=="ButtonControl" and control.Name in ("立即投稿","发布","定时发布"):
-            self.check()
-            if self.on_submit:
-                self.on_submit()
-        return super().click(control)
+        submission = getattr(self,"submission_requested",False)
+        previous = getattr(self, "before_click_press", None)
+        if submission:
+            def before_press():
+                live = getattr(control, "control", control)
+                for attempt in range(3):
+                    if not self.visible(live) or not live.IsEnabled:
+                        raise RuntimeError("发布按钮不可见或尚不可用，未点击发布。")
+                    rect = live.BoundingRectangle
+                    x, y = self.uia.GetCursorPos()
+                    if rect.left <= x < rect.right and rect.top <= y < rect.bottom:
+                        break
+                    if attempt < 2:
+                        self.move_pointer(((rect.left + rect.right)//2, (rect.top + rect.bottom)//2))
+                        self.check()
+                else:
+                    raise RuntimeError(f"发布按钮位置核验失败：按钮范围=({rect.left}, {rect.top}, {rect.right}, {rect.bottom})，鼠标=({x}, {y})，未点击发布。")
+                if self.on_submit:
+                    self.on_submit()
+            self.before_click_press = before_press
+        try:
+            return super().click(control)
+        finally:
+            self.before_click_press = previous
 
 
 def main():

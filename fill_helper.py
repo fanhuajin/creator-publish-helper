@@ -16,7 +16,7 @@ from focus_detection import focused_field
 AUTOMATION_REQUEST = Path(__file__).with_name("keyboard_request.json")
 AUTOMATION_RESULT = Path(__file__).with_name("keyboard_result.json")
 AUTOMATION_READY = Path(__file__).with_name("keyboard_ready.json")
-KEYBOARD_PROTOCOL = 2
+KEYBOARD_PROTOCOL = 3
 
 
 def write_keyboard_state(path, value):
@@ -397,7 +397,7 @@ def main():
                         continue
                     # 恢复用户确认有效的固定等待流程；截图变化不代表候选准备完成。
                     region = None
-                    if platform in ("douyin", "xiaohongshu"):
+                    if platform == "douyin":
                         point = wintypes.POINT()
                         if not user.GetCursorPos(ctypes.byref(point)):
                             raise ctypes.WinError(ctypes.get_last_error())

@@ -150,7 +150,7 @@ def main():
     paused.on_tick = None
     paused.on_pause = Mock()
     paused.paused_seconds = 0.0
-    with patch("bilibili_auto.ctypes.windll.user32.GetAsyncKeyState", return_value=0x8000):
+    with patch("bilibili_auto.ctypes.windll.user32.GetAsyncKeyState", side_effect=[0x8000,0x8000,0]):
         paused.check()
     paused.on_pause.assert_called_once()
     now = datetime(2026, 10, 9, 12, 0, tzinfo=CHINA_TIME)

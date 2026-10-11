@@ -31,3 +31,6 @@ xiaohongshu_auto_status.json
 multi_publish_state.json
 multi_publish_state.tmp
 multi_publish_state.json.manual-backup
+multi_publish_state.json.before-*
+douyin_datepicker_diagnostic.json
+xiaohongshu_time_diagnostic.json

@@ -143,7 +143,7 @@ class XiaohongshuDraft(DouyinDraft):
         def entry():
             return next((c for c in self.controls() if c.ControlTypeName == "EditControl"
                          and self.visible(c) and c.BoundingRectangle.width()>300
-                         and c.BoundingRectangle.top>label.BoundingRectangle.top-20), None)
+                         and label.BoundingRectangle.top-20<c.BoundingRectangle.top<label.BoundingRectangle.bottom+180), None)
         e = entry()
         if bool(e) != bool(selected):
             r = label.BoundingRectangle
@@ -152,12 +152,23 @@ class XiaohongshuDraft(DouyinDraft):
                           and 40<c.BoundingRectangle.width()<60 and c.BoundingRectangle.left>r.right,
                           "定时发布开关")
             self.click(toggle)
-            time.sleep(0.4)
+            deadline = self.now() + 5
+            while self.now() < deadline:
+                self.check()
+                if bool(entry()) == bool(selected):
+                    break
+                time.sleep(0.15)
+            else:
+                raise RuntimeError("未确认小红书定时发布开关状态，未发布。")
         if not selected:
+            if entry() is not None:
+                raise RuntimeError("未确认关闭小红书定时发布，未发布。")
             return
         e = entry()
         if e is None:
             raise RuntimeError("定时时间输入框未出现。")
+        stage=getattr(self,"on_stage",None) or (lambda value:None)
+        stage("schedule_calendar")
         self.click(e)
         time.sleep(0.4)
         from datetime import datetime, timedelta
@@ -174,51 +185,61 @@ class XiaohongshuDraft(DouyinDraft):
             self.click(buttons[0])
         else:
             raise RuntimeError("日历月份不匹配。")
-        # 六行日历从当月1号所在周的周一开始；排除相邻月份同名日期。
-        first = datetime(selected.year,selected.month,1)
-        index = selected.day-1+first.weekday()
+        from schedule_controls import calendar_day, wait_hour_readback
+        from xiaohongshu_schedule import choose_hour
         mr = month.BoundingRectangle
         days = [c for c in self.controls() if self.visible(c) and c.Name.isdigit()
                 and mr.left-210<c.BoundingRectangle.left<mr.left+160
                 and mr.bottom+50<c.BoundingRectangle.top<mr.bottom+340]
-        days.sort(key=lambda c:(c.BoundingRectangle.top,c.BoundingRectangle.left))
-        unique = {}
-        for c in days:
-            r=c.BoundingRectangle
-            unique.setdefault((r.left,r.top),c)
-        days=list(unique.values())
-        if len(days)<index+1 or days[index].Name != str(selected.day):
-            raise RuntimeError("日历日期布局变化，停止选择。")
-        self.click(days[index])
-        hour_label = self.wait_name("时")
-        hr=hour_label.BoundingRectangle
-        self.move_pointer((hr.left-10,hr.top+120))
-        self.scroll_at("up", 15)
-        time.sleep(0.3)
-        for _ in range(30):
-            self.check()
-            options=[c for c in self.controls() if self.visible(c) and c.Name==f"{selected.hour:02d}"
-                     and hr.left-50<c.BoundingRectangle.left<hr.right
-                     and hr.top-10<c.BoundingRectangle.top<hr.top+370]
-            if options:
-                self.click(options[0])
-                break
-            self.scroll_at("down", 1)
-            time.sleep(0.15)
-        else:
-            raise RuntimeError("小时列表未找到目标小时。")
+        stage("schedule_date")
+        self.click(calendar_day(days,selected.year,selected.month,selected.day))
+        stage("schedule_hour")
+        choose_hour(self,selected)
         r=e.BoundingRectangle
         self.click_at((r.left-35,r.top-40))
-        value=entry().GetValuePattern().Value
-        actual=datetime.strptime(value,"%Y-%m-%d %H:%M").replace(tzinfo=selected.tzinfo)
-        if (actual.date(),actual.hour)!=(selected.date(),selected.hour):
-            raise RuntimeError("页面日期或小时与队列不一致。")
+        stage("schedule_readback")
+        def value():
+            current=entry()
+            return current.GetValuePattern().Value if current else None
+        actual=wait_hour_readback(self,value,selected,"小红书")
         now=datetime.now(selected.tzinfo)
         if not now+timedelta(hours=1)<=actual<=now+timedelta(days=14):
             raise RuntimeError("页面时间须在1小时后、14天内。")
-        self.actual_publish_at=value
+        self.actual_publish_at=actual
+
+    def xiaohongshu_hour_options(self):
+        from xiaohongshu_schedule import hour_options
+        return hour_options(self)
+
+    def set_declaration(self):
+        label=self.form_find("添加内容类型声明")
+        def selected():
+            current=self.locate("添加内容类型声明")
+            if current is None:
+                return False
+            r=current.BoundingRectangle
+            for c in self.controls():
+                if c.Name!="笔记含AI合成内容" or not self.visible(c):
+                    continue
+                b=c.BoundingRectangle
+                if r.left<=(b.left+b.right)/2<=r.right and r.top<=(b.top+b.bottom)/2<=r.bottom:
+                    return True
+            return False
+        if selected():
+            return
+        self.click(label)
+        self.click(self.wait_name("笔记含AI合成内容"))
+        deadline=self.now()+5
+        while self.now()<deadline:
+            self.check()
+            if selected():
+                return
+            time.sleep(0.15)
+        raise RuntimeError("未确认小红书AI声明已出现在声明栏，未继续发布。")
 
     def run(self, video, title, description, tags, cover, category, publish_at):
+        stage = getattr(self, "on_stage", None) or (lambda value: None)
+        stage("entry")
         self.select_browser()
         if self.locate("完成"):
             self.finish_cover()
@@ -235,27 +256,32 @@ class XiaohongshuDraft(DouyinDraft):
             self.choose_file(video)
             self.wait_name(hint, timeout=60)
         self.start_keyboard_helper(video.parent/"发布文案.txt")
+        stage("title")
         self.keyboard_fill(self.form_find(hint,editable=True,direction="up"),"title",title)
         body=self.locate("输入正文描述，真诚有价值的分享予人温暖")
         if not body:
             body=next((c for c in self.controls() if self.visible(c) and c.Name.strip()==description.strip()),None)
         if body is None:
             raise RuntimeError("未找到正文编辑区。")
+        stage("description")
         self.focus_description(body)
         # 重启续跑时先清空已有正文，让原始提示恢复，按键助手才能明确识别字段。
         self.keys("{Ctrl}a{Back}")
         self.click(self.wait_name("输入正文描述，真诚有价值的分享予人温暖"))
         self.keyboard_field("description")
+        stage("cover")
         self.set_cover(cover)
-        declaration=self.form_find("添加内容类型声明")
-        if not self.locate("笔记含AI合成内容"):
-            self.click(declaration)
-            self.click(self.wait_name("笔记含AI合成内容"))
+        stage("declaration")
+        self.set_declaration()
+        stage("schedule")
         self.schedule(publish_at)
+        stage("upload_ready")
         self.wait_uploaded()
         name="定时发布" if publish_at else "发布"
         button=self.require_control(self.controls(),lambda c:c.Name==name and c.ControlTypeName=="ButtonControl" and self.visible(c),f"提交按钮“{name}”")
-        self.click(button)
+        stage("submit_ready")
+        self.submit(button)
+        stage("confirm_result")
         deadline=self.now()+60
         while self.now()<deadline:
             self.check()
@@ -290,14 +316,16 @@ def xiaohongshu_cover(folder):
     return path.resolve()
 
 
-def select_xiaohongshu_hour(date,hour):
+def select_xiaohongshu_hour(date,hour,now=None):
     from datetime import datetime,timedelta
     from bilibili_auto import CHINA_TIME
-    now=datetime.now(CHINA_TIME)
+    now=now or datetime.now(CHINA_TIME)
     start=datetime.strptime(f"{date} {hour}","%Y-%m-%d %H").replace(tzinfo=CHINA_TIME)
-    if start+timedelta(minutes=59)<now+timedelta(hours=1) or start>now+timedelta(days=14):
-        raise ValueError("小红书定时应在北京时间1小时后、14天内。")
-    return start
+    for minute in range(60):
+        candidate=start.replace(minute=minute)
+        if now+timedelta(hours=1)<=candidate<=now+timedelta(days=14):
+            return candidate
+    raise ValueError("小红书定时应在北京时间1小时后、14天内。")
 
 
 def main():
