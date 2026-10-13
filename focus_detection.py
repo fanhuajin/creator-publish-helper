@@ -55,10 +55,10 @@ def classify_field(platform, observation):
         for control in focused:
             if control.get("automation_id") == "RootWebArea":
                 continue
-            if control.get("control_type") == "ControlType.Edit":
-                continue
             class_name = control.get("class_name", "").lower()
             known_editor = any(name in class_name.split() for name in ("ql-editor", "prosemirror", "tiptap"))
+            if control.get("control_type") == "ControlType.Edit" and not known_editor:
+                continue
             # 抖音 Slate 正文的稳定类名；不使用带构建哈希的外层容器类名。
             if platform == "douyin" and control.get("focus_origin"):
                 known_editor = known_editor or {

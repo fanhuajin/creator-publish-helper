@@ -32,7 +32,10 @@ def scroll_select(draft, options, target, description, *, max_steps=60):
         values = [int(c.Name.removesuffix("时").removesuffix("分")) for c in controls]
         chosen = choose_control([c for c,v in zip(controls,values) if v == target])
         if chosen is not None:
-            draft.click(chosen)
+            if hasattr(chosen,"control"):
+                draft.click_declaration(chosen)
+            else:
+                draft.click(chosen)
             return
         signature = tuple(sorted((c.Name,c.BoundingRectangle.left,c.BoundingRectangle.top) for c in controls))
         unchanged = unchanged + 1 if signature == previous else 0
@@ -40,9 +43,22 @@ def scroll_select(draft, options, target, description, *, max_steps=60):
             raise RuntimeError(f"{description}列表滚动后未变化：目标{target:02d}，可见值{values}，未发布。")
         previous = signature
         # 光标始终落在本轮列表中间项，不能在旧锚点或整页上发送滚轮。
-        anchor = sorted(controls,key=lambda c:c.BoundingRectangle.top)[len(controls)//2].BoundingRectangle
+        anchor_control = sorted(controls,key=lambda c:c.BoundingRectangle.top)[len(controls)//2]
+        anchor = anchor_control.BoundingRectangle
         direction = "up" if target < min(values) else "down"
-        draft.scroll_at(direction,1,((anchor.left+anchor.right)//2,(anchor.top+anchor.bottom)//2))
+        if hasattr(anchor_control,"control"):
+            live=anchor_control.control
+            point=((anchor.left+anchor.right)//2,(anchor.top+anchor.bottom)//2)
+            draft.move_pointer(point)
+            latest=live.BoundingRectangle
+            if not draft.visible(live):
+                raise RuntimeError(f"{description}滚动锚点已不可见，未滚动页面或发布。")
+            if not latest.left<=point[0]<latest.right or not latest.top<=point[1]<latest.bottom:
+                previous=None
+                continue
+            draft.scroll_at(direction,1)
+        else:
+            draft.scroll_at(direction,1,((anchor.left+anchor.right)//2,(anchor.top+anchor.bottom)//2))
         time.sleep(0.2)
     raise RuntimeError(f"{description}列表未找到{target:02d}，未发布。")
 

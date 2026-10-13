@@ -99,7 +99,12 @@ def main():
     draft.declaration()
     label = SimpleNamespace(BoundingRectangle=SimpleNamespace(top=300))
     draft.find = lambda name, editable=False: label
-    draft.controls = lambda: [SimpleNamespace(Name="舞蹈", BoundingRectangle=SimpleNamespace(top=300))]
+    label.Name="分区"
+    label.ControlTypeName="TextControl"
+    label.BoundingRectangle=SimpleNamespace(top=300,left=30,right=60,bottom=320)
+    draft.controls = lambda: [label,SimpleNamespace(Name="舞蹈",ControlTypeName="TextControl",
+        BoundingRectangle=SimpleNamespace(top=300,left=100,right=130,bottom=320))]
+    draft.input_column = lambda: 100
     draft.visible = lambda control: True
     draft.category("舞蹈")
     tag_draft = object.__new__(BilibiliDraft)
@@ -117,6 +122,12 @@ def main():
                       "fill_tags", "description", "schedule", "wait_uploaded", "find", "click", "check", "on_submit"):
         setattr(concurrent, operation, lambda *args, op=operation, **kwargs: order.append(op))
     concurrent.locate = lambda name: None
+    concurrent.wait_bilibili_form = lambda: None
+    concurrent.reveal_bilibili_cover = lambda: None
+    concurrent.bilibili_cover_is_confirmed = lambda *args: False
+    concurrent.bilibili_tags_match = lambda *args: False
+    concurrent.bilibili_description_matches = lambda *args: False
+    concurrent.validate_bilibili_draft = lambda *args: None
     concurrent.run(Path("作品/最终成片.mp4"), "标题", "简介", ["标签"], Path("封面.png"), "舞蹈", None)
     assert order.index("cover") < order.index("wait_uploaded")
     assert order.index("schedule") < order.index("wait_uploaded") < order.index("click")

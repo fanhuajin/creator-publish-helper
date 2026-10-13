@@ -1,5 +1,6 @@
 """小红书作品文件夹批量发布。"""
 import json
+import re
 import time
 import unicodedata
 from pathlib import Path
@@ -95,7 +96,14 @@ class XiaohongshuDraft(DouyinDraft):
     def form_find(self, name, editable=False, direction="down"):
         for _ in range(20):
             self.check()
-            target = self.locate(name, editable)
+            if name=="定时发布":
+                target=next((c for c in self.controls() if c.Name==name
+                    and c.ControlTypeName=="TextControl" and self.visible(c)),None)
+                if (target and getattr(self,"window",None)
+                        and target.BoundingRectangle.top>self.window.BoundingRectangle.bottom-180):
+                    target=None
+            else:
+                target = self.locate(name, editable)
             if target:
                 return target
             self.scroll_form(direction, 4)
@@ -115,11 +123,51 @@ class XiaohongshuDraft(DouyinDraft):
         p = previews[0].BoundingRectangle
         self.move_pointer(((p.left+p.right)//2,p.bottom-40))
         self.click(self.wait_name("编辑封面"))
-        self.click(self.wait_name("上传"))
+        self.click(self.cover_upload_button())
         self.choose_file(path)
-        self.wait_name("已上传封面", timeout=30)
+        self.wait_uploaded_cover()
         self.finish_cover()
         self.wait_name("封面效果评估通过，未发现封面质量问题", timeout=60)
+
+    def cover_upload_button(self, timeout=8):
+        """模板页保留时只切换已实测的“裁剪”工具页，一次切换后只读等待。"""
+        from bilibili_auto import choose_control
+        deadline=self.now()+timeout
+        switched=False
+        while self.now()<deadline:
+            self.check()
+            controls=self.controls()
+            upload=choose_control([c for c in controls if c.Name=="上传" and self.visible(c)])
+            if upload is not None and upload.IsEnabled:
+                return upload
+            done=choose_control([c for c in controls if c.Name=="完成" and self.visible(c)])
+            if done is not None and not switched and upload is None:
+                crop=choose_control([c for c in controls if c.Name=="裁剪"
+                    and c.ControlTypeName=="TextControl" and self.visible(c)])
+                if crop is not None:
+                    self.click(crop)
+                    switched=True
+                    deadline=self.now()+timeout
+            time.sleep(0.15)
+        if switched:
+            raise RuntimeError("已切换到裁剪页，但小红书封面上传入口未出现，已保留当前稿件。")
+        raise RuntimeError("小红书封面编辑器未显示上传入口或唯一的“裁剪”页签，已保留当前稿件。")
+
+    def uploaded_cover(self):
+        """上传缩略图的可访问名称可能包含子按钮，不能匹配清除按钮本身。"""
+        from bilibili_auto import choose_control
+        return choose_control([c for c in self.controls() if self.visible(c)
+            and re.fullmatch(r"已上传封面(?:\s+清除已上传封面)?",c.Name.strip())])
+
+    def wait_uploaded_cover(self, timeout=30):
+        deadline=self.now()+timeout
+        while self.now()<deadline:
+            self.check()
+            uploaded=self.uploaded_cover()
+            if uploaded is not None:
+                return uploaded
+            time.sleep(0.2)
+        raise RuntimeError("小红书封面上传缩略图未就绪，未完成封面或发布。")
 
     def finish_cover(self):
         # 文件名出现时图片仍可能加载；等待按钮可用，并确认编辑窗口确实关闭。
@@ -130,7 +178,7 @@ class XiaohongshuDraft(DouyinDraft):
             button = self.locate("完成")
             if button is None:
                 return
-            uploaded = self.locate("已上传封面")
+            uploaded = self.uploaded_cover()
             if uploaded and button.IsEnabled:
                 if last_click is None or self.now()-last_click >= 5:
                     self.click(button)
@@ -167,24 +215,35 @@ class XiaohongshuDraft(DouyinDraft):
         e = entry()
         if e is None:
             raise RuntimeError("定时时间输入框未出现。")
+        from datetime import datetime,timedelta
+        try:
+            actual=datetime.strptime(e.GetValuePattern().Value.strip(),"%Y-%m-%d %H:%M").replace(tzinfo=selected.tzinfo)
+        except ValueError:
+            actual=None
+        if actual and (actual.date(),actual.hour)==(selected.date(),selected.hour):
+            from datetime import datetime,timedelta
+            now=datetime.now(selected.tzinfo)
+            if not now+timedelta(hours=1)<=actual<=now+timedelta(days=14):
+                raise RuntimeError("页面时间须在1小时后、14天内。")
+            self.actual_publish_at=actual
+            return
         stage=getattr(self,"on_stage",None) or (lambda value:None)
         stage("schedule_calendar")
         self.click(e)
-        time.sleep(0.4)
-        from datetime import datetime, timedelta
-        for _ in range(3):
+        from calendar_navigation import select_calendar_month
+        from bilibili_auto import choose_control
+        def read_month():
             cs = self.controls()
-            year = self.require_control(cs, lambda c:c.Name.endswith("年") and c.Name[:-1].isdigit() and self.visible(c), "日历年份")
-            month = self.require_control(cs, lambda c:c.Name.endswith("月") and c.Name[:-1].isdigit() and self.visible(c), "日历月份")
-            if int(year.Name[:-1]) == selected.year and int(month.Name[:-1]) == selected.month:
-                break
-            buttons = [c for c in cs if self.visible(c) and c.ControlTypeName == "ButtonControl"
-                       and any(word in c.Name for word in ("下个月", "下一月", "Next month"))]
-            if not buttons:
-                raise RuntimeError("无法找到日历下月按钮。")
-            self.click(buttons[0])
-        else:
-            raise RuntimeError("日历月份不匹配。")
+            year = choose_control([c for c in cs if c.Name.endswith("年") and c.Name[:-1].isdigit() and self.visible(c)])
+            month = choose_control([c for c in cs if c.Name.endswith("月") and c.Name[:-1].isdigit() and self.visible(c)])
+            if year is None or month is None:
+                return None
+            return int(year.Name[:-1]), int(month.Name[:-1]), month
+        def navigation(direction):
+            names = ("下个月", "下一月", "Next month") if direction == "next" else ("上个月", "上一月", "Previous month")
+            return choose_control([c for c in self.controls() if self.visible(c)
+                and c.ControlTypeName == "ButtonControl" and c.Name in names])
+        _, _, month = select_calendar_month(self, selected, read_month, navigation, "小红书日历")
         from schedule_controls import calendar_day, wait_hour_readback
         from xiaohongshu_schedule import choose_hour
         mr = month.BoundingRectangle
@@ -192,7 +251,8 @@ class XiaohongshuDraft(DouyinDraft):
                 and mr.left-210<c.BoundingRectangle.left<mr.left+160
                 and mr.bottom+50<c.BoundingRectangle.top<mr.bottom+340]
         stage("schedule_date")
-        self.click(calendar_day(days,selected.year,selected.month,selected.day))
+        day=calendar_day(days,selected.year,selected.month,selected.day)
+        (self.click_declaration if hasattr(day,"control") else self.click)(day)
         stage("schedule_hour")
         choose_hour(self,selected)
         r=e.BoundingRectangle
@@ -210,6 +270,21 @@ class XiaohongshuDraft(DouyinDraft):
     def xiaohongshu_hour_options(self):
         from xiaohongshu_schedule import hour_options
         return hour_options(self)
+
+    def wait_uploaded(self):
+        # 固定底栏按钮始终可见，选完时间后原地等待可提交状态，不回滚页面。
+        deadline=self.now()+180
+        while self.now()<deadline:
+            controls=self.controls()
+            if any("上传失败" in c.Name for c in controls):
+                raise RuntimeError("视频上传失败。")
+            uploading=any("取消上传" in c.Name or "上传中" in c.Name for c in controls)
+            if not uploading and any(c.Name in ("定时发布","发布")
+                    and c.ControlTypeName=="ButtonControl" and self.visible(c) and c.IsEnabled
+                    for c in controls):
+                return
+            time.sleep(0.2)
+        raise RuntimeError("发布按钮等待超时，未提交。")
 
     def set_declaration(self):
         label=self.form_find("添加内容类型声明")
@@ -251,26 +326,23 @@ class XiaohongshuDraft(DouyinDraft):
                 raise RuntimeError(f"当前小红书稿件与队列作品不一致：页面标题{actual_title!r}，队列标题{title!r}，未修改稿件。")
         else:
             self.next_upload()
-            upload=self.wait_name("上传视频",timeout=30)
+            upload=self.wait_upload_button()
             self.click(upload)
             self.choose_file(video)
             self.wait_name(hint, timeout=60)
         self.start_keyboard_helper(video.parent/"发布文案.txt")
-        stage("title")
-        self.keyboard_fill(self.form_find(hint,editable=True,direction="up"),"title",title)
-        body=self.locate("输入正文描述，真诚有价值的分享予人温暖")
-        if not body:
-            body=next((c for c in self.controls() if self.visible(c) and c.Name.strip()==description.strip()),None)
-        if body is None:
-            raise RuntimeError("未找到正文编辑区。")
-        stage("description")
-        self.focus_description(body)
-        # 重启续跑时先清空已有正文，让原始提示恢复，按键助手才能明确识别字段。
-        self.keys("{Ctrl}a{Back}")
-        self.click(self.wait_name("输入正文描述，真诚有价值的分享予人温暖"))
-        self.keyboard_field("description")
-        stage("cover")
-        self.set_cover(cover)
+        if not (existing and getattr(self,"resume_settings",False)):
+            stage("title")
+            self.keyboard_fill(self.form_find(hint,editable=True,direction="up"),"title",title)
+            body=self.description_editor("输入正文描述，真诚有价值的分享予人温暖", description)
+            stage("description")
+            self.focus_description(body)
+            # 重启续跑时先清空已有正文，让原始提示恢复，按键助手才能明确识别字段。
+            self.keys("{Ctrl}a{Back}")
+            self.click(self.wait_name("输入正文描述，真诚有价值的分享予人温暖"))
+            self.keyboard_field("description")
+            stage("cover")
+            self.set_cover(cover)
         stage("declaration")
         self.set_declaration()
         stage("schedule")
@@ -295,10 +367,30 @@ class XiaohongshuDraft(DouyinDraft):
         raise RuntimeError("已点击发布，但未确认成功；请检查笔记管理，避免重复提交。")
 
     def next_upload(self):
-        if self.locate("上传视频"):
+        if self.upload_button():
             return
-        self.click(self.wait_name("发布笔记",timeout=30))
-        self.wait_name("上传视频",timeout=30)
+        # 成功页会倒计时跳回发布页；这期间不要点击导航打断自动跳转。
+        names = self.control_names()
+        if not any("发布成功" in name or "跳转" in name for name in names):
+            self.click(self.wait_name("发布笔记",timeout=30))
+        self.wait_upload_button()
+
+    def upload_button(self):
+        from bilibili_auto import choose_control
+        return choose_control([c for c in self.controls()
+            if c.Name == "上传视频" and c.ControlTypeName == "ButtonControl"
+            and self.visible(c) and c.IsEnabled])
+
+    def wait_upload_button(self, timeout=45):
+        # 顶部“上传视频”文字标签不能打开文件框，只接受上传区域的真实按钮。
+        deadline = self.now() + timeout
+        while self.now() < deadline:
+            self.check()
+            button = self.upload_button()
+            if button is not None:
+                return button
+            time.sleep(0.2)
+        raise RuntimeError("小红书跳转后上传按钮未就绪，未点击上传或选择文件。")
 
 
 def prepare_xiaohongshu(folder):

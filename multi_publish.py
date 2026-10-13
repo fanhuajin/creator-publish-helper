@@ -1,5 +1,6 @@
 """三端发布队列：保留状态，继续未完成平台，由用户删除记录。"""
 import json
+import hashlib
 import re
 import time
 import traceback
@@ -18,6 +19,48 @@ def save_state(path, state):
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
+
+
+def source_fingerprint(platform, prepared, covers, category):
+    """确认本次素材与上次相同，不能只凭标题或历史阶段跳过正文和封面。"""
+    def file_signature(value):
+        path = Path(value).resolve()
+        before = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise RuntimeError(f"读取时素材发生变化，请完成保存后再继续：{path.name}")
+        return {"path": str(path), "sha256": digest.hexdigest()}
+
+    video, title, description, tags = prepared
+    copy_path = Path(video).parent / "发布文案.txt"
+    cover_paths = covers if isinstance(covers, (list, tuple)) else (covers,)
+    payload = {
+        "version": 1, "platform": platform,
+        "video": file_signature(video),
+        "title": title, "description": description, "tags": list(tags),
+        "copy": file_signature(copy_path) if copy_path.is_file() else None,
+        "covers": [file_signature(path) for path in cover_paths],
+        "category": category,
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def settings_resume_allowed(previous, fingerprint, platform):
+    """仅最新一次未提交、素材一致且已完成编辑的尝试可以从设置续跑。"""
+    if previous.get("submitted") or previous.get("source_fingerprint") != fingerprint:
+        return False
+    stage = previous.get("stage") or ""
+    if stage in ("schedule", "upload_ready", "submit_ready") or stage.startswith("schedule_"):
+        return True
+    return platform == "douyin" and (stage == "settings" or previous.get("error") in (
+        "未确认保存权限为不允许。",
+        "没有找到“不允许”，页面或浏览器可访问性可能发生变化。",
+    ))
 
 
 def recover_item(item):
@@ -52,6 +95,10 @@ class ThreeRows(WorkRows):
     def __init__(self, parent, change, timezone, state_change):
         super().__init__(parent, change, timezone)
         self.state_change=state_change
+        self.max_content_height = min(700, max(140, self.winfo_screenheight() - 300))
+        self.layout_job = None
+        self.wheel_remainder = 0
+        self.scrollbar = next(w for w in self.winfo_children() if isinstance(w, ttk.Scrollbar))
         header = self.winfo_children()[0]
         header.winfo_children()[-1].destroy()
         header.configure(padding=(0,4))
@@ -59,12 +106,44 @@ class ThreeRows(WorkRows):
             widget.configure(style="Heading.TLabel")
         for p in PLATFORMS:
             ttk.Label(header, text=LABELS[p], width=12,style="Heading.TLabel").pack(side="left")
+        ttk.Label(header, text="操作", width=10,style="Heading.TLabel").pack(side="left")
         self.column_header=header
         header.pack_configure(fill="x")
         self.canvas.bind("<Configure>",self.align_header,add="+")
         self.canvas.configure(background="#f7f7f7")
         self.canvas.bind("<MouseWheel>",self.wheel)
         self.body.bind("<MouseWheel>",self.wheel)
+        self.body.bind("<Configure>", self.schedule_layout)
+        self.canvas.bind("<Configure>", self.schedule_layout, add="+")
+        self.canvas.configure(height=70)
+        self.schedule_layout()
+
+    def schedule_layout(self, event=None):
+        if self.layout_job is None:
+            self.layout_job = self.after_idle(self.fit_content)
+
+    def fit_content(self):
+        self.layout_job = None
+        content_height = self.body.winfo_reqheight() if self.rows else 70
+        viewport_height = min(self.max_content_height, max(70, content_height))
+        if int(self.canvas.cget("height")) != viewport_height:
+            self.canvas.configure(height=viewport_height)
+        overflow = content_height > viewport_height
+        if overflow and not self.scrollbar.winfo_manager():
+            self.scrollbar.pack(side="right", fill="y", before=self.canvas)
+        elif not overflow and self.scrollbar.winfo_manager():
+            self.scrollbar.pack_forget()
+        self.canvas.configure(scrollregion=(0, 0, self.canvas.winfo_width(),
+                                            max(content_height, self.canvas.winfo_height())))
+        if not overflow:
+            self.canvas.yview_moveto(0)
+            self.wheel_remainder = 0
+        if self.rows:
+            self.canvas.configure(yscrollincrement=next(iter(self.rows.values()))["frame"].winfo_reqheight())
+        root = self.winfo_toplevel()
+        requested_height = root.winfo_reqheight()
+        if root.winfo_height() != requested_height:
+            root.geometry(f"{max(1100, root.winfo_width())}x{requested_height}")
 
     def align_header(self,event=None):
         if not self.rows:
@@ -72,7 +151,7 @@ class ThreeRows(WorkRows):
         self.update_idletasks()
         row=next(iter(self.rows.values()))
         widgets=row["frame"].winfo_children()
-        columns=[widgets[0],widgets[1],row["date_box"],row["hour_box"]]+[row["platform_boxes"][p] for p in PLATFORMS]
+        columns=[widgets[0],widgets[1],row["date_box"],row["hour_box"]]+[row["platform_boxes"][p] for p in PLATFORMS]+[row["preview_button"]]
         for label,control in zip(self.column_header.winfo_children(),columns):
             label.pack_forget()
             label.place(x=control.winfo_x(),y=0,width=control.winfo_width(),height=24)
@@ -80,14 +159,20 @@ class ThreeRows(WorkRows):
         self.column_header.configure(height=24)
 
     def wheel(self,event):
-        self.canvas.yview_scroll(-int(event.delta/120),"units")
+        if self.body.winfo_reqheight() <= self.canvas.winfo_height():
+            return "break"
+        self.wheel_remainder += event.delta
+        steps = int(self.wheel_remainder / 120)
+        self.wheel_remainder -= steps * 120
+        if steps:
+            self.canvas.yview_scroll(-steps,"units")
         return "break"
 
     def insert(self, parent, position, iid, text, values):
         display=re.sub(r"_\d{10,}$","",text).replace("_跳舞_"," · ").replace("_唱歌_"," · ")
         super().insert(parent, position, iid, display, values)
         row = self.rows[iid]
-        row["frame"].configure(padding=(0,3))
+        row["frame"].configure(padding=(0,1))
         row["frame"].bind("<MouseWheel>",self.wheel)
         for widget in row["frame"].winfo_children():
             if not isinstance(widget,ttk.Combobox):
@@ -103,7 +188,17 @@ class ThreeRows(WorkRows):
             box.bind("<<ComboboxSelected>>",lambda event,key=iid,platform=p,variable=var:self.state_change(key,platform,variable.get()))
             box.bind("<Double-Button-1>",lambda event,key=iid,platform=p:self.state_change(key,platform,"核对"))
             row["platform_boxes"][p]=box
+        row["preview_button"] = ttk.Button(row["frame"], text="查看视频", width=9,
+                                            command=lambda key=iid: self.preview(key))
+        row["preview_button"].pack(side="left", padx=4)
+        for widget in row["frame"].winfo_children():
+            widget.bind("<MouseWheel>", self.wheel)
         self.after_idle(self.align_header)
+        self.schedule_layout()
+
+    def delete(self, key):
+        super().delete(key)
+        self.schedule_layout()
 
     def update_states(self, key, states):
         for p, var in self.rows[key]["platforms"].items():
@@ -115,6 +210,7 @@ class ThreeRows(WorkRows):
     def set_enabled(self, enabled):
         super().set_enabled(enabled)
         for row in self.rows.values():
+            row["preview_button"].configure(state="normal" if enabled else "disabled")
             for p,box in row["platform_boxes"].items():
                 box.configure(state="readonly" if enabled and row["platforms"][p].get() not in ("已完成","待核对","发布中") else "disabled")
 
@@ -138,8 +234,8 @@ class MultiQueue(PublishQueue):
         icon=Path(__file__).with_name("assets")/"creator-publish.ico"
         if icon.exists():
             root.iconbitmap(str(icon))
-        root.geometry("1000x630")
-        root.minsize(920,560)
+        root.geometry("1100x300")
+        root.minsize(920,240)
         panel = ttk.Frame(root, padding=12,style="Page.TFrame")
         panel.pack(fill="both", expand=True)
         self.summary=tk.StringVar(value="整理作品，安排时间，一次完成三端发布")
@@ -151,11 +247,12 @@ class MultiQueue(PublishQueue):
         ttk.Button(toolbar,text="取消全选",command=lambda:self.tree.select_all(False)).pack(side="left",padx=4)
         ttk.Button(toolbar,text="删除选中记录",command=self.remove,style="Danger.TButton").pack(side="right")
         card=ttk.Frame(panel)
-        card.pack(fill="both",expand=True,pady=(10,8))
+        card.pack(fill="x",pady=(10,8))
         self.tree=ThreeRows(card,self.set_item_time,timezone,self.set_platform_state)
+        self.tree.preview=self.preview_video
         self.tree.pack(fill="both",expand=True)
         ttk.Label(panel,textvariable=self.notice,wraplength=1180,style="Subtitle.TLabel").pack(anchor="w",pady=(0,6))
-        ttk.Label(panel,text="状态选择“不发布”即可跳过对应平台  ·  Esc 暂停  ·  已完成作品自动跳过",style="Subtitle.TLabel").pack(anchor="w")
+        ttk.Label(panel,text="点击“查看视频”预览并选择发布平台  ·  ↑ / ↓ 切换视频  ·  Esc 暂停",style="Subtitle.TLabel").pack(anchor="w")
         actions=ttk.Frame(panel)
         actions.pack(fill="x",pady=(10,0))
         self.platform_buttons={}
@@ -169,13 +266,36 @@ class MultiQueue(PublishQueue):
         root.bind("<Escape>",lambda event:self.request_pause())
         self.restore_queue()
 
+    def preview_video(self, key):
+        if self.running or key not in self.items:
+            return
+        from video_preview import VideoPreview
+        try:
+            from bilibili_auto import prepare_files
+            video, *_ = prepare_files(self.items[key]["folder"])
+            keys = list(self.items)
+            def resolve(index):
+                selected = keys[index]
+                video, *_ = prepare_files(self.items[selected]["folder"])
+                return video, self.items[selected], lambda p, v: self.set_platform_state(selected, p, v)
+            VideoPreview(self.root, video, self.items[key], LABELS,
+                         lambda platform, value: self.set_platform_state(key, platform, value),
+                         navigate=resolve, index=keys.index(key), total=len(keys))
+        except Exception as error:
+            messagebox.showerror("无法预览视频", str(error), parent=self.root)
+
     def add(self, folder):
         folder=Path(folder).resolve()
         key=str(folder)
         if key in self.items:
             return
         self.validate(folder)
-        item={"folder":folder,"date":self.date.get(),"hour":self.hour.get(),"scheduled":self.scheduled.get(),
+        date, hour = self.date.get(), "01"
+        if self.items:
+            previous = next(reversed(self.items.values()))
+            next_time = datetime.strptime(f"{previous['date']} {previous['hour']}", "%Y-%m-%d %H") + timedelta(hours=1)
+            date, hour = next_time.strftime("%Y-%m-%d"), next_time.strftime("%H")
+        item={"folder":folder,"date":date,"hour":hour,"scheduled":self.scheduled.get(),
               "states":{p:"待发布" for p in PLATFORMS},"details":{}}
         self.items[key]=item
         self.tree.insert("","end",iid=key,text=folder.name,values=self.values(item))
@@ -332,12 +452,17 @@ class MultiQueue(PublishQueue):
         """只更新本端状态，初始化、选择时间和网页失败都保存到本端历史。"""
         cls,prepare,cover,category,select=self.adapters[platform]
         previous=item["details"].get(platform,{})
+        if previous.get("submitted"):
+            item["states"][platform]="待核对"
+            self.tree.update_states(key,item["states"])
+            self.save_queue()
+            raise RuntimeError(f"{LABELS[platform]}已记录点击发布，请先核对发布结果，避免重复提交。")
         detail={"submitted":False}
         if previous:
             history=list(previous.get("attempts",[]))
             history.append({k:v for k,v in previous.items() if k!="attempts"})
             detail["attempts"]=history
-        if previous.get("stage"):
+        if platform=="bilibili" and previous.get("stage"):
             detail["stage"]=previous["stage"]
         item["details"][platform]=detail
         item["states"][platform]="发布中"
@@ -345,20 +470,28 @@ class MultiQueue(PublishQueue):
         self.save_queue()
         self.notice.set(f"正在发布 {item['folder'].name} → {LABELS[platform]}")
         try:
+            prepared=prepare(item["folder"])
+            covers=cover(item["folder"])
+            selected_category=category(item["folder"])
+            fingerprint=source_fingerprint(platform,prepared,covers,selected_category)
+            detail["source_fingerprint"]=fingerprint
+            resume_settings=settings_resume_allowed(previous,fingerprint,platform)
+            if resume_settings:
+                detail["stage"]=previous.get("stage") or "settings"
+            self.save_queue()
             draft=cls()
+            if platform=="xiaohongshu":
+                draft.resume_settings=resume_settings
+            if platform=="bilibili" and not previous.get("submitted"):
+                draft.bilibili_checkpoint=previous.get("bilibili_checkpoint")
+                def save_bilibili_checkpoint(value):
+                    detail["bilibili_checkpoint"]=value
+                    self.save_queue()
+                draft.on_bilibili_checkpoint=save_bilibili_checkpoint
+                if draft.bilibili_checkpoint:
+                    detail["bilibili_checkpoint"]=draft.bilibili_checkpoint
             if platform=="douyin":
-                draft.resume_stage=previous.get("stage")
-                if not previous.get("submitted") and (
-                    draft.resume_stage in ("schedule","upload_ready","submit_ready")
-                    or (draft.resume_stage or "").startswith("schedule_")
-                    or previous.get("error") in (
-                        "未确认保存权限为不允许。",
-                        "没有找到“不允许”，页面或浏览器可访问性可能发生变化。",
-                    )
-                ):
-                    draft.resume_stage="settings"
-                if not detail.get("stage") and draft.resume_stage:
-                    detail["stage"]=draft.resume_stage
+                draft.resume_stage="settings" if resume_settings else None
             draft.on_tick=self.tick
             draft.on_stage=lambda stage:self.stage(item,platform,stage)
             draft.on_pause=lambda:self.pause_platform(item,platform)
@@ -367,7 +500,7 @@ class MultiQueue(PublishQueue):
             detail["requested_mode"]="定时" if selected else "立即发布"
             detail["requested_time"]=str(selected) if selected else None
             self.save_queue()
-            draft.run(*prepare(item["folder"]),cover(item["folder"]),category(item["folder"]),selected)
+            draft.run(*prepared,covers,selected_category,selected)
         except Exception as error:
             item["states"][platform]="待核对" if detail["submitted"] else "失败"
             detail["error"]=str(error) or f"{type(error).__name__}：查找控件失败，详见错误位置"
@@ -463,6 +596,8 @@ class SubmissionTracking:
 
 def main():
     import ctypes
+    # UIA初始化会设置进程DPI模式；必须先于Tk窗口创建，避免首次运行时窗口缩小。
+    import windows_mcp.uia
     from bilibili_auto import BilibiliDraft,prepare_files,cover_from_folder,category_from_folder,select_hour,CHINA_TIME
     from douyin_auto import DouyinDraft,prepare_douyin,douyin_covers,select_douyin_hour
     from xiaohongshu_auto import XiaohongshuDraft,prepare_xiaohongshu,xiaohongshu_cover,select_xiaohongshu_hour

@@ -32,6 +32,13 @@ class CompleteWorkflowTests(unittest.TestCase):
         draft.find=lambda *args,**kwargs:button
         draft.form_find=lambda *args,**kwargs:body
         draft.wait_name=lambda *args,**kwargs:body
+        draft.wait_upload_button=lambda *args,**kwargs:button
+        draft.wait_bilibili_form=Mock()
+        draft.reveal_bilibili_cover=Mock()
+        draft.bilibili_cover_is_confirmed=Mock(return_value=False)
+        draft.bilibili_tags_match=Mock(return_value=False)
+        draft.bilibili_description_matches=Mock(return_value=False)
+        draft.validate_bilibili_draft=Mock()
         draft.locate=lambda name,*args,**kwargs:body if name in ("添加作品简介","输入正文描述，真诚有价值的分享予人温暖","笔记含AI合成内容") else None
         if cls is DouyinDraft:
             draft.controls=lambda:[NS(Name="标题",ControlTypeName="TextControl"),NS(Name="内容管理",ControlTypeName="TextControl")]

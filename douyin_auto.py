@@ -54,10 +54,7 @@ class DouyinDraft(BilibiliDraft):
             raise RuntimeError("未找到抖音页面控件根节点。")
         result = []
         for control, _ in self.uia.WalkControl(document, maxDepth=35):
-            try:
-                result.append(ControlSnapshot(control))
-            except COMError:
-                continue
+            result.append(ControlSnapshot(control))
             if len(result) > 12000:
                 raise RuntimeError("抖音页面控件异常增多，停止读取。")
         return result
@@ -108,13 +105,109 @@ class DouyinDraft(BilibiliDraft):
             self.click_at(((rect.left + rect.right) // 2, rect.top - 65))
         self.click(self.wait_name("上传封面"))
         self.choose_file(path)
-        time.sleep(1)
-        self.click(self.wait_name("完成"))
+        self.click(self.wait_cover_ready("完成"))
         for _ in range(20):
             if not self.locate("横封面预览（4:3）"):
                 return
             time.sleep(0.2)
         raise RuntimeError("横版封面编辑器未关闭。")
+
+    def wait_cover_ready(self, button_name, timeout=90):
+        """图片上传期间等待按钮可用，不把按钮已经出现当作封面加载完成。"""
+        deadline = self.now() + timeout
+        ready = 0
+        while self.now() < deadline:
+            self.check()
+            controls = self.controls()
+            from bilibili_auto import choose_control
+            button = choose_control([c for c in controls if c.Name == button_name and self.visible(c)])
+            # 视频也在后台上传，只把封面弹窗内的状态作为封面加载证据。
+            dialogs = []
+            if button is not None:
+                b = button.BoundingRectangle
+                x, y = (b.left + b.right) / 2, (b.top + b.bottom) / 2
+                for c in controls:
+                    r = c.BoundingRectangle
+                    if (c.ControlTypeName in ("GroupControl", "WindowControl", "CustomControl")
+                            and any(word in getattr(c, "ClassName", "").lower() for word in ("modal", "dialog"))
+                            and self.visible(c) and r.left <= x <= r.right and r.top <= y <= r.bottom
+                            and r.width() > 250 and r.height() > 100):
+                        dialogs.append(c)
+            popup = min(dialogs, key=lambda c:c.BoundingRectangle.width()*c.BoundingRectangle.height()) if dialogs else None
+            def cover_status(c):
+                if "封面" in c.Name or "图片" in c.Name:
+                    return True
+                if popup is None:
+                    return False
+                r, p = c.BoundingRectangle, popup.BoundingRectangle
+                return p.left <= (r.left+r.right)/2 <= p.right and p.top <= (r.top+r.bottom)/2 <= p.bottom
+            if any("上传失败" in c.Name and cover_status(c) for c in controls):
+                raise RuntimeError("抖音封面上传失败，未继续发布。")
+            uploading = any(("上传中" in c.Name or "正在上传" in c.Name) and cover_status(c) for c in controls)
+            if button is not None and button.IsEnabled and not uploading:
+                ready += 1
+                if ready >= 2:
+                    return button
+            else:
+                ready = 0
+            time.sleep(0.2)
+        raise RuntimeError(f"抖音封面加载或“{button_name}”按钮等待超时，已保留当前稿件。")
+
+    def description_editor(self, placeholder, description):
+        """按稳定编辑器类名恢复正文，已有话题或部分文案不影响定位。"""
+        from bilibili_auto import choose_control
+        for _ in range(20):
+            self.check()
+            empty = self.locate(placeholder)
+            if empty is not None:
+                return empty
+            controls = self.controls()
+            editors = []
+            for c in controls:
+                classes = getattr(c, "ClassName", "").lower().split()
+                known = any(name in classes for name in ("ql-editor", "prosemirror", "tiptap"))
+                if self.page_title == "抖音创作者中心":
+                    known = known or {"zone-container", "editor-kit-container", "editor-comp-publish"}.issubset(classes)
+                if (known and c.ControlTypeName in ("EditControl", "GroupControl", "CustomControl")
+                        and getattr(c, "AutomationId", "") != "RootWebArea"):
+                    editors.append(c)
+            editor = choose_control(editors)
+            if editor is None:
+                # 保留旧版页面单独暴露简介文字的情况，输入前仍核验真实焦点。
+                editor = choose_control([c for c in controls if self.visible(c)
+                    and c.ControlTypeName == "TextControl" and c.Name.strip() == description.strip()])
+                if editor is None:
+                    raise RuntimeError("未找到可确认的正文编辑区，未清空或输入正文。")
+                return editor
+            if self.visible(editor):
+                return editor
+            rect = editor.BoundingRectangle
+            window = self.window.BoundingRectangle
+            direction = "up" if (rect.top + rect.bottom) / 2 < window.top + 100 else "down"
+            if hasattr(self, "scroll_form"):
+                self.scroll_form(direction, 1)
+            else:
+                x = (rect.left + rect.right) // 2
+                y = max(window.top + 140, min((rect.top + rect.bottom) // 2, window.bottom - 80))
+                if not window.left < x < window.right or rect.width() <= 0 or rect.height() <= 0:
+                    raise RuntimeError("正文编辑器没有有效的表单位置，未清空或输入正文。")
+                self.scroll_at(direction, 1, (x, y))
+                time.sleep(0.15)
+        raise RuntimeError("滚动后正文编辑器仍不可见，未清空或输入正文。")
+
+    def focus_description(self, body):
+        from focus_detection import focused_field
+        for _ in range(3):
+            self.click(body)
+            try:
+                field = focused_field("douyin", self.window.NativeWindowHandle)
+            except ValueError:
+                time.sleep(0.2)
+                continue
+            if field == "description":
+                return
+            raise RuntimeError(f"抖音正文点击后焦点为{field}，未清空或输入正文。")
+        raise RuntimeError("抖音正文未获得可确认的编辑焦点，未清空或输入正文。")
 
     def declaration(self):
         if self.locate("内容由AI生成"):
@@ -175,24 +268,19 @@ class DouyinDraft(BilibiliDraft):
         stage=getattr(self,"on_stage",None) or (lambda value:None)
         stage("schedule_calendar")
         self.click(entry)
-        from schedule_controls import wait_candidates
-        # 日历节点必须可见，按所属日历区域定位日期。
-        for _ in range(2):
-            headers = wait_candidates(self,lambda:[c for c in self.controls() if self.visible(c)
-                       and re.fullmatch(r"\d{4}年\s*\d{1,2}月", c.Name)],"抖音日历")
-            from bilibili_auto import choose_control
-            header = choose_control(headers)
+        from bilibili_auto import choose_control
+        from calendar_navigation import select_calendar_month
+        def read_month():
+            header = choose_control([c for c in self.controls() if self.visible(c)
+                and re.fullmatch(r"\d{4}年\s*\d{1,2}月", c.Name)])
             if header is None:
-                raise RuntimeError("未找到抖音日期日历。")
+                return None
             numbers = re.findall(r"\d+", header.Name)
-            if (int(numbers[0]), int(numbers[1])) == (selected.year, selected.month):
-                break
-            next_month = self.locate("下个月") or self.locate("下一月")
-            if next_month is None:
-                raise RuntimeError("未确认日历下一月按钮，请手动切换月份后继续。")
-            self.click(next_month)
-        else:
-            raise RuntimeError("日历月份与所选月份不一致。")
+            return int(numbers[0]), int(numbers[1]), header
+        def navigation(direction):
+            names = ("下个月", "下一月", "Next month") if direction == "next" else ("上个月", "上一月", "Previous month")
+            return choose_control([c for c in self.controls() if self.visible(c) and c.Name in names])
+        _, _, header = select_calendar_month(self, selected, read_month, navigation, "抖音日历")
         r = header.BoundingRectangle
         from douyin_schedule import find_calendar_day
         from schedule_controls import scroll_select, wait_hour_readback
@@ -266,9 +354,8 @@ class DouyinDraft(BilibiliDraft):
         self.click_at(((rect.left + rect.right) // 2 + 15, rect.top - 65))
         self.click(self.wait_name("上传封面"))
         self.choose_file(path)
-        time.sleep(1)
         # 先进入横版，最后的完成按钮会保存两种封面。
-        self.wait_name("设置横封面")
+        self.wait_cover_ready("设置横封面")
 
     def wait_uploaded(self):
         deadline = self.now() + 180
@@ -286,7 +373,10 @@ class DouyinDraft(BilibiliDraft):
         stage("entry")
         self.select_browser()
         hint = "填写作品标题，为作品获得更多流量"
-        existing = self.locate(hint, editable=True)
+        from bilibili_auto import choose_control
+        # 设置阶段标题通常已滚出屏幕，仍须识别保留的稿件，不能误进上传页。
+        existing = choose_control([c for c in self.controls()
+            if c.Name == hint and c.ControlTypeName == "EditControl"], editable=True)
         if existing:
             if existing.GetValuePattern().Value != title:
                 raise RuntimeError("当前抖音稿件与队列作品不一致，请返回空白上传页。")
@@ -303,14 +393,9 @@ class DouyinDraft(BilibiliDraft):
         self.start_keyboard_helper(video.parent / "发布文案.txt")
         stage("title")
         self.keyboard_fill(self.find(hint, editable=True), "title", title)
-        body = self.locate("添加作品简介")
-        if not body:
-            body = next((c for c in self.controls() if self.visible(c)
-                         and c.ControlTypeName == "TextControl" and c.Name.strip() == description), None)
-        if body is None:
-            raise RuntimeError("未找到作品简介编辑区。")
+        body = self.description_editor("添加作品简介", description)
         stage("description")
-        self.click(body)
+        self.focus_description(body)
         self.keyboard_field("description")
         stage("cover")
         self.vertical_cover(covers[0])

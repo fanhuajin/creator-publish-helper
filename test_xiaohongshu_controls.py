@@ -6,6 +6,62 @@ from xiaohongshu_auto import XiaohongshuDraft
 
 
 class ControlsTests(unittest.TestCase):
+    def test_upload_readiness_uses_visible_submit_button_without_scrolling(self):
+        draft=object.__new__(XiaohongshuDraft)
+        draft.form_find=Mock();draft.scroll_form=Mock()
+        draft.now=Mock(side_effect=[0,1]);draft.visible=lambda c:True
+        draft.controls=lambda:[SimpleNamespace(Name="定时发布",ControlTypeName="ButtonControl",IsEnabled=True)]
+        draft.wait_uploaded()
+        draft.form_find.assert_not_called();draft.scroll_form.assert_not_called()
+
+    def test_disabled_submit_waits_in_place_until_ready(self):
+        draft=object.__new__(XiaohongshuDraft)
+        draft.now=Mock(side_effect=[0,1,2]);draft.visible=lambda c:True
+        draft.controls=Mock(side_effect=[
+            [SimpleNamespace(Name="定时发布",ControlTypeName="ButtonControl",IsEnabled=False)],
+            [SimpleNamespace(Name="定时发布",ControlTypeName="ButtonControl",IsEnabled=True)]])
+        draft.scroll_form=Mock()
+        with patch("xiaohongshu_auto.time.sleep"):
+            draft.wait_uploaded()
+        self.assertEqual(draft.controls.call_count,2)
+        draft.scroll_form.assert_not_called()
+
+    def test_matching_schedule_is_preserved_without_opening_calendar(self):
+        from datetime import datetime,timedelta
+        from bilibili_auto import CHINA_TIME
+        selected=(datetime.now(CHINA_TIME)+timedelta(days=1)).replace(hour=16,minute=0)
+        draft=object.__new__(XiaohongshuDraft)
+        label=SimpleNamespace(BoundingRectangle=SimpleNamespace(top=100,bottom=120))
+        actual=selected.replace(minute=30)
+        entry=SimpleNamespace(ControlTypeName="EditControl",
+            BoundingRectangle=SimpleNamespace(top=130,width=lambda:400),
+            GetValuePattern=lambda:SimpleNamespace(Value=actual.strftime("%Y-%m-%d %H:%M")))
+        draft.form_find=Mock(return_value=label);draft.controls=lambda:[entry]
+        draft.visible=lambda c:True;draft.click=Mock()
+        draft.schedule(selected)
+        self.assertEqual(draft.actual_publish_at.strftime("%Y-%m-%d %H:%M"),actual.strftime("%Y-%m-%d %H:%M"))
+        draft.click.assert_not_called()
+
+    def test_schedule_label_scrolls_past_same_named_submit_button(self):
+        draft=object.__new__(XiaohongshuDraft)
+        button=SimpleNamespace(Name="定时发布",ControlTypeName="ButtonControl")
+        label=SimpleNamespace(Name="定时发布",ControlTypeName="TextControl")
+        draft.check=Mock();draft.visible=lambda c:True
+        draft.controls=Mock(side_effect=[[button],[button,label]])
+        draft.scroll_form=Mock()
+        self.assertIs(draft.form_find("定时发布"),label)
+        draft.scroll_form.assert_called_once_with("down",4)
+
+    def test_existing_body_editor_exposed_as_edit_is_recognized(self):
+        from focus_detection import classify_field
+        observation={"controls":[{"focused":True,"focus_origin":True,
+            "control_type":"ControlType.Edit","class_name":"tiptap ProseMirror ProseMirror-focused",
+            "text_read_only":False}]}
+        self.assertEqual(classify_field("xiaohongshu",observation),"description")
+        observation["controls"][0]["class_name"]=""
+        with self.assertRaises(ValueError):
+            classify_field("xiaohongshu",observation)
+
     def test_declaration_menu_text_is_not_mistaken_for_saved_value(self):
         draft=object.__new__(XiaohongshuDraft)
         label=SimpleNamespace(BoundingRectangle=SimpleNamespace(left=100,top=100,right=600,bottom=156))
@@ -61,7 +117,7 @@ class ControlsTests(unittest.TestCase):
         button=SimpleNamespace(IsEnabled=True)
         draft.now=Mock(side_effect=[0,0.1,0.2,0.3])
         draft.check=Mock(); draft.click=Mock()
-        draft.locate=Mock(side_effect=[button,object(),None])
+        draft.locate=Mock(side_effect=[button,None]);draft.uploaded_cover=Mock(return_value=object())
         with patch("xiaohongshu_auto.time.sleep"):
             draft.finish_cover()
         draft.click.assert_called_once_with(button)
@@ -71,7 +127,7 @@ class ControlsTests(unittest.TestCase):
         disabled=SimpleNamespace(IsEnabled=False); ready=SimpleNamespace(IsEnabled=True)
         draft.now=Mock(side_effect=[0,0.1,0.2,0.3,0.4])
         draft.check=Mock(); draft.click=Mock()
-        draft.locate=Mock(side_effect=[disabled,object(),ready,object(),None])
+        draft.locate=Mock(side_effect=[disabled,ready,None]);draft.uploaded_cover=Mock(return_value=object())
         with patch("xiaohongshu_auto.time.sleep"):
             draft.finish_cover()
         draft.click.assert_called_once_with(ready)
@@ -81,17 +137,41 @@ class ControlsTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,"定时发布开关"):
             draft.require_control([],lambda c:True,"定时发布开关")
 
-    def test_upload_entry_accepts_text_control(self):
+    def test_upload_entry_uses_verified_button(self):
         draft=object.__new__(XiaohongshuDraft)
         draft.select_browser=Mock(); draft.locate=Mock(return_value=None)
         draft.controls=lambda:[]; draft.next_upload=Mock()
-        entry=SimpleNamespace(Name="上传视频",ControlTypeName="TextControl")
-        draft.wait_name=Mock(side_effect=[entry,RuntimeError("停止在上传后")])
+        entry=SimpleNamespace(Name="上传视频",ControlTypeName="ButtonControl")
+        draft.wait_upload_button=Mock(return_value=entry)
+        draft.wait_name=Mock(side_effect=RuntimeError("停止在上传后"))
         draft.click=Mock(); draft.choose_file=Mock()
         with self.assertRaisesRegex(RuntimeError,"停止在上传后"):
             draft.run(Path("work/video.mp4"),"标题","正文",[],None,None,None)
         draft.click.assert_called_once_with(entry)
         draft.choose_file.assert_called_once_with(Path("work/video.mp4"))
+
+    def test_upload_tab_text_is_not_upload_button(self):
+        draft=object.__new__(XiaohongshuDraft)
+        text=SimpleNamespace(Name="上传视频",ControlTypeName="TextControl")
+        draft.controls=lambda:[text]; draft.visible=lambda c:True
+        self.assertIsNone(draft.upload_button())
+
+    def test_success_countdown_waits_without_clicking_navigation(self):
+        draft=object.__new__(XiaohongshuDraft)
+        draft.upload_button=Mock(return_value=None)
+        draft.control_names=Mock(return_value=["发布成功", "3秒后跳转"])
+        draft.click=Mock(); draft.wait_upload_button=Mock()
+        draft.next_upload()
+        draft.click.assert_not_called()
+        draft.wait_upload_button.assert_called_once()
+
+    def test_waits_through_transition_until_button_enabled(self):
+        draft=object.__new__(XiaohongshuDraft)
+        button=object()
+        draft.now=Mock(side_effect=[0,1,2,3]); draft.check=Mock()
+        draft.upload_button=Mock(side_effect=[None,None,button])
+        with patch("xiaohongshu_auto.time.sleep"):
+            self.assertIs(draft.wait_upload_button(),button)
 
 
 if __name__ == "__main__":

@@ -80,7 +80,11 @@ class SettingsTests(unittest.TestCase):
     def test_resume_skips_upload_and_covers(self):
         draft=self.draft(); draft.resume_stage="settings"
         draft.select_browser=Mock()
-        draft.locate=Mock(return_value=SimpleNamespace(GetValuePattern=lambda:SimpleNamespace(Value="标题")))
+        existing=SimpleNamespace(Name="填写作品标题，为作品获得更多流量",ControlTypeName="EditControl",
+            BoundingRectangle=SimpleNamespace(left=100,top=-100,right=600,bottom=-60),
+            GetValuePattern=lambda:SimpleNamespace(Value="标题"))
+        draft.controls=lambda:[existing]
+        draft.locate=Mock(return_value=None)
         draft.control_names=lambda:["内容由AI生成"]
         draft.finish_publish=Mock(); draft.upload=Mock(); draft.vertical_cover=Mock()
         draft.run(None,"标题","正文",[],None,None,None)

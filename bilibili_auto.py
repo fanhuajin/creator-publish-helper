@@ -34,6 +34,17 @@ class ControlSnapshot:
         self.ControlTypeName = control.ControlTypeName
         self.BoundingRectangle = control.BoundingRectangle
         self.IsOffscreen = control.IsOffscreen
+        self.ClassName = self._optional(control, "ClassName", "")
+        self.AutomationId = self._optional(control, "AutomationId", "")
+        self.IsEnabled = self._optional(control, "IsEnabled", True)
+
+    @staticmethod
+    def _optional(control, name, default):
+        # 次要属性在页面刷新时可能抛 COMError（getattr 默认值拦不住），按缺省值处理。
+        try:
+            return getattr(control, name, default)
+        except COMError:
+            return default
 
     def __getattr__(self, name):
         # 点击和状态模式仍使用实时控件，失效时停止，不盲目重发操作。
@@ -167,27 +178,45 @@ class BilibiliDraft:
             if self.window:
                 self.window.SetFocus()
                 time.sleep(0.2)
-        if self.window and self.uia.GetForegroundControl().NativeWindowHandle != self.window.NativeWindowHandle:
-            platform = getattr(self, "page_title", "B站")
-            raise RuntimeError(f"当前窗口发生变化，流程已停止，请切回{platform}后重新运行。")
+        if self.window:
+            self.ensure_foreground()
+
+    def ensure_foreground(self, grace=6.0):
+        """前台窗口短暂被弹窗/通知抢走时只读等待，不发送任何输入；超时才停止。"""
+        deadline = time.monotonic() + grace
+        while True:
+            try:
+                current = self.uia.GetForegroundControl()
+                if current is not None and current.NativeWindowHandle == self.window.NativeWindowHandle:
+                    return
+            except COMError:
+                pass  # 窗口切换瞬间读取失败，视为暂时不匹配并重试。
+            if time.monotonic() >= deadline:
+                platform = getattr(self, "page_title", "B站")
+                raise RuntimeError(f"当前窗口发生变化，流程已停止，请切回{platform}后重新运行。")
+            if self.on_tick:
+                self.on_tick()
+            time.sleep(0.2)
 
     def now(self):
         return time.monotonic() - self.paused_seconds
 
     def controls(self):
         """只遍历选定浏览器窗口，控件不可见时不用于坐标操作。"""
-        self.check()
-        result = []
-        for control, _ in self.uia.WalkControl(self.window, maxDepth=45):
+        last_error=None
+        for attempt in range(4):
+            self.check()
+            result=[]
             try:
-                snapshot = ControlSnapshot(control)
-            except COMError:
-                # 页面关闭弹层后旧节点会暂时失效；仅丢弃读取失效节点，不重发输入。
-                continue
-            result.append(snapshot)
-            if len(result) > 4000:
-                raise RuntimeError("控件数量过多，停止以避免定位到其他区域。")
-        return result
+                for control, _ in self.uia.WalkControl(self.window, maxDepth=45):
+                    result.append(ControlSnapshot(control))
+                    if len(result)>4000:
+                        raise RuntimeError("控件数量过多，停止以避免定位到其他区域。")
+                return result
+            except COMError as error:
+                last_error=error
+                time.sleep(0.15)
+        raise RuntimeError("页面控件正在刷新，重新读取后仍未稳定，已保留当前稿件。") from last_error
 
     def visible(self, control):
         rect = control.BoundingRectangle
@@ -267,6 +296,20 @@ class BilibiliDraft:
             mouse_event(0x0800, wheel=120 if direction == "up" else -120)
             time.sleep(0.04)
 
+    def scroll_in_control(self, control, direction, amount=1):
+        """鼠标移动后再次核验实际滚动容器，位置变化时重定位而不滚整页。"""
+        live=getattr(control,"control",control)
+        for _ in range(4):
+            self.check()
+            rect=live.BoundingRectangle
+            self.move_pointer(((rect.left+rect.right)//2,(rect.top+rect.bottom)//2))
+            latest=live.BoundingRectangle
+            x,y=self.uia.GetCursorPos()
+            if self.visible(live) and latest.left<x<latest.right and latest.top<y<latest.bottom:
+                self.scroll_at(direction,amount)
+                return
+        raise RuntimeError("滚动区域持续改变位置，未发送滚轮。")
+
     def page_scroll_point(self):
         rect = self.window.BoundingRectangle
         current = self.uia.GetCursorPos()
@@ -330,6 +373,8 @@ class BilibiliDraft:
         self.uia.SendKeys(keys, waitTime=0.12)
 
     def click(self, control):
+        if isinstance(control,ControlSnapshot):
+            return self.click_declaration(control)
         self.check()
         if not self.visible(control):
             raise RuntimeError("目标控件已离开可见区域，停止输入。")
@@ -411,21 +456,8 @@ class BilibiliDraft:
     def start_keyboard_helper(self, copy_file):
         """复用正在运行的按键版；未运行时启动，F6仍由按键版注册和处理。"""
         self.copy_file = copy_file
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.OpenMutexW.argtypes = [ctypes.c_ulong, ctypes.c_bool, ctypes.c_wchar_p]
-        kernel.OpenMutexW.restype = ctypes.c_void_p
-        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
-        handle = kernel.OpenMutexW(0x100000, False, "Local\\CreatorPublishHelper")
-        if handle:
-            kernel.CloseHandle(handle)
-        else:
-            AUTOMATION_READY.unlink(missing_ok=True)
-            subprocess.Popen(
-                [sys.executable, "-B", "-u", "-X", "utf8",
-                 str(Path(__file__).with_name("fill_helper.py")), str(copy_file)],
-                cwd=Path(__file__).parent, creationflags=subprocess.CREATE_NO_WINDOW,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+        from keyboard_session import start
+        start(copy_file)
         deadline = self.now() + 5
         while self.now() < deadline:
             self.check()
@@ -531,21 +563,51 @@ class BilibiliDraft:
         self.click(self.find("上传视频"))
         self.choose_file(video)
 
+    def file_dialog(self):
+        """Edge的文件框可能已显示但浏览器仍为前台；只接受本窗口的弹窗。"""
+        from ctypes import wintypes
+        user = ctypes.windll.user32
+        user.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        user.GetWindow.restype = wintypes.HWND
+        browser = self.window.NativeWindowHandle
+        found = []
+        candidates = self.window.GetChildren() + self.uia.GetRootControl().GetChildren()
+        handles = set()
+        for control in candidates:
+            if control.Name not in ("打开", "Open") or control.IsOffscreen:
+                continue
+            handle = control.NativeWindowHandle
+            if not handle or handle in handles:
+                continue
+            handles.add(handle)
+            owner = user.GetWindow(handle, 4)  # GW_OWNER
+            seen = set()
+            while owner and owner not in seen:
+                if owner == browser:
+                    found.append(control)
+                    break
+                seen.add(owner)
+                owner = user.GetWindow(owner, 4)
+        if len(found) > 1:
+            raise RuntimeError("当前浏览器存在多个文件选择窗口，未输入文件路径。")
+        return found[0] if found else None
+
     def choose_file(self, path):
         """共用系统文件选择框：填写明确路径，返回浏览器后再执行后续步骤。"""
         deadline = self.now() + 8
         dialog = None
         while self.now() < deadline:
-            foreground = self.uia.GetForegroundControl()
-            if foreground.Name == "打开":
-                dialog = foreground
+            dialog = self.file_dialog()
+            if dialog is not None:
                 break
             time.sleep(0.1)
         if dialog is None:
             raise RuntimeError("文件选择窗口未出现。")
         # 文件窗口是唯一允许的临时焦点切换；文件名仅为视频路径，不执行命令。
         browser = self.window
+        dialog.SetFocus()
         self.window = dialog
+        self.check()
         entries = [
             item for item, _ in self.uia.WalkControl(dialog, maxDepth=12)
             if item.ControlTypeName == "EditControl" and "文件名" in item.Name
@@ -563,11 +625,15 @@ class BilibiliDraft:
             raise RuntimeError("存在多个文件名输入框。")
         self.keys("{Enter}")
         deadline = self.now() + 8
-        while self.uia.GetForegroundControl().NativeWindowHandle != browser.NativeWindowHandle:
+        while self.file_dialog_visible(dialog):
             if self.now() > deadline:
                 raise RuntimeError("文件选择窗口未关闭，请检查文件路径。")
             time.sleep(0.1)
         self.window = browser
+        self.check()
+
+    def file_dialog_visible(self, dialog):
+        return bool(ctypes.windll.user32.IsWindowVisible(dialog.NativeWindowHandle))
 
     def cover(self, path):
         label = self.find("封面")
@@ -592,12 +658,22 @@ class BilibiliDraft:
                 self.click(checkbox[0])
         # 保留上传后的默认居中和缩放，不点击顶部滑块或移动图片。
         self.click(self.wait_name("完成"))
-        deadline = self.now() + 10
-        while self.locate("封面制作"):
-            if self.now() > deadline:
-                raise RuntimeError("封面编辑器未关闭，停止后续操作。")
-            time.sleep(0.2)
+        self.wait_cover_closed()
         print("同一封面已上传；使用默认居中位置，请最终检查两种比例的文字。", flush=True)
+
+    def wait_cover_closed(self):
+        """B站保存封面会重建控件树；仅重读确认结果，不重复保存或上传。"""
+        deadline = self.now() + 10
+        last_error = None
+        while self.now() < deadline:
+            self.check()
+            try:
+                if self.locate("封面制作") is None:
+                    return
+            except COMError as error:
+                last_error = error
+            time.sleep(0.2)
+        raise RuntimeError("B站封面保存后页面未稳定或编辑器未关闭，已停止后续操作。") from last_error
 
     def declaration(self):
         entry = self.find("请选择符合您视频内容的创作声明", editable=True)
@@ -678,75 +754,95 @@ class BilibiliDraft:
             json.dumps(data,ensure_ascii=False,indent=2),encoding="utf-8")
 
     def category(self, value):
-        label = self.find("分区")
-        rect = label.BoundingRectangle
-        if any(
-            item.Name == value and self.visible(item)
-            and abs(item.BoundingRectangle.top - rect.top) < 30
-            and self.input_column() <= item.BoundingRectangle.left < self.input_column()+260
-            for item in self.controls()
-        ):
-            return
-        # 让下拉菜单有足够的可见空间，滚动点始终留在菜单内。
-        if rect.top > self.window.BoundingRectangle.bottom-450:
-            self.scroll_at("down",3)
-            label=self.find("分区")
-            rect=label.BoundingRectangle
-        self.click_at((self.input_column() + 100, (rect.top + rect.bottom) // 2))
-        loc = (self.input_column() + 40, rect.bottom + 80)
-        self.scroll_at("up", 30, loc)
-        for _ in range(16):
-            option = self.category_option(value)
-            if option:
-                self.click(option)
-                break
-            self.check()
-            self.scroll_at("down", 2, loc)
-            time.sleep(0.15)
-        else:
-            raise RuntimeError(f"分区列表中没有找到{value}。")
-        time.sleep(0.2)
-        label = self.find("分区")
-        if not any(
-            item.Name == value and self.visible(item)
-            and abs(item.BoundingRectangle.top - label.BoundingRectangle.top) < 30
-            and self.input_column() <= item.BoundingRectangle.left < self.input_column()+260
-            for item in self.controls()
-        ):
-            raise RuntimeError(f"未确认{value}分区。")
+        from bilibili_category import set_category
+        return set_category(self,value)
 
     def category_option(self, value):
-        """仅查分区菜单选项，排除页面标题、已选值及推荐文字。"""
-        found = []
-        controls=self.controls()
-        label=choose_control([c for c in controls if c.Name=="分区" and self.visible(c)])
-        rect=label.BoundingRectangle if label else None
-        left=self.input_column() if label else None
-        menu_names={"音乐","舞蹈","动画","绘画","娱乐","游戏","知识","科技","运动","汽车","美食","生活","影视","时尚","动物圈","亲子","健康","情感","vlog"}
-        menu=[c for c in controls if rect and c.Name in menu_names and self.visible(c)
-              and left<=c.BoundingRectangle.left<left+260
-              and rect.bottom+10<c.BoundingRectangle.top<rect.bottom+400]
-        for item in controls:
-            if item.Name != value or not self.visible(item):
+        from bilibili_category import category_option
+        return category_option(self,value)
+
+    def in_bilibili_category_menu(self, control):
+        node = getattr(control, "control", control)
+        for _ in range(8):
+            if node is None:
+                break
+            try:
+                if "drop-list-v2-content-wrp" in getattr(node, "ClassName", ""):
+                    return True
+                if node.ControlTypeName in ("DocumentControl", "WindowControl"):
+                    break
+                parent = getattr(node, "GetParentControl", None)
+                node = parent() if parent else None
+            except COMError:
+                return False
+        return False
+
+    def bilibili_category_menu(self, controls=None):
+        from bilibili_category import category_menu
+        return category_menu(self,controls)
+
+    def reveal_bilibili_cover(self):
+        for _ in range(20):
+            if self.locate("封面") is not None:
+                return
+            self.scroll_page("up", 2)
+        raise RuntimeError("B站封面区域未进入视野，已停止。")
+
+    def bilibili_cover_signature(self, video, cover):
+        import hashlib
+        stat = video.stat()
+        return hashlib.sha256((str(video.resolve()) + str(stat.st_size) + str(stat.st_mtime_ns)
+            + hashlib.sha256(cover.read_bytes()).hexdigest()).encode("utf-8")).hexdigest()
+
+    def bilibili_cover_is_confirmed(self, video, title, cover):
+        previous = getattr(self, "bilibili_checkpoint", None)
+        if not previous:
+            return False
+        if previous.get("cover_signature") != self.bilibili_cover_signature(video,cover):
+            return False
+        names = self.control_names()
+        fields = [c for c in self.controls() if c.Name == "请输入稿件标题" and c.ControlTypeName == "EditControl"]
+        return (video.stem in names and len(fields) == 1
+                and fields[0].GetValuePattern().Value.strip() == title.strip())
+
+    def wait_bilibili_form(self):
+        deadline = self.now() + 30
+        while self.now() < deadline:
+            if "请输入稿件标题" in self.control_names():
+                return
+            time.sleep(0.2)
+        raise RuntimeError("B站投稿表单未就绪。")
+
+    def validate_bilibili_draft(self, video, title):
+        fields = [c for c in self.controls() if c.Name == "请输入稿件标题" and c.ControlTypeName == "EditControl"]
+        if len(fields) > 1:
+            raise RuntimeError("B站存在多个投稿标题框，未修改稿件。")
+        if fields:
+            actual = fields[0].GetValuePattern().Value.strip()
+            if actual not in ("",video.stem,title.strip()):
+                raise RuntimeError(f"B站当前稿件标题{actual!r}与队列作品{title!r}不一致，未覆盖当前稿件。")
+
+    def bilibili_tags_match(self, tags):
+        controls = self.controls()
+        names = [c.Name for c in controls]
+        # 推荐标签也同名；容量和标签行内节点必须同时匹配。
+        if not any(f"还可以添加{10-len(tags)}个标签" in name for name in names):
+            return False
+        actual=[]
+        for c in controls:
+            if c.Name not in tags:
                 continue
-            if len({c.Name for c in menu})>=3 and item in menu:
-                found.append(item)
-                continue
-            node = getattr(item, "control", item)
-            for _ in range(8):
-                if node is None:
-                    break
-                role = node.ControlTypeName
-                class_name = getattr(node, "ClassName", "").lower()
-                if role in ("ListItemControl", "MenuItemControl") or any(
-                    marker in class_name for marker in ("dropdown", "cascader-menu", "select-item", "select-option")
-                ):
-                    found.append(item)
-                    break
-                if role in ("DocumentControl", "WindowControl"):
-                    break
-                node = node.GetParentControl()
-        return choose_control(found)
+            try:
+                if getattr(c.GetParentControl(),"ClassName","")=="label-item-v2-content":
+                    actual.append(c.Name)
+            except COMError:
+                return False
+        return sorted(actual) == sorted(tags)
+
+    def bilibili_description_matches(self, value):
+        # 已填正文会作为完整Group/Text节点暴露，精确匹配才省略键盘操作。
+        return any(c.Name.strip() == value.strip() and c.ControlTypeName in ("GroupControl", "TextControl")
+                   for c in self.controls()) if value.strip() else False
 
     def wait_uploaded(self):
         deadline = self.now() + 180
@@ -808,10 +904,10 @@ class BilibiliDraft:
         self.verify_text(value)
 
     def reveal_schedule(self):
-        """开关可见不代表下方日期可见；先为完整定时区域留出空间。"""
+        """为下方一行日期/时间留空间；弹层可向上展开，不要求整张日历在下方。"""
         for _ in range(8):
             label = self.find("定时发布")
-            if label.BoundingRectangle.bottom < self.window.BoundingRectangle.bottom - 320:
+            if label.BoundingRectangle.bottom < self.window.BoundingRectangle.bottom - 160:
                 return label
             self.scroll_page("down", 2)
         raise RuntimeError("定时发布区域未完整进入视野，请向下滚动页面后重试。")
@@ -852,6 +948,13 @@ class BilibiliDraft:
             date, clock = self.schedule_fields()
         if date is None or clock is None:
             raise RuntimeError("无法识别定时发布日期和时间。")
+        try:
+            current=datetime.strptime(f"{date.Name} {clock.Name}","%Y-%m-%d %H:%M").replace(tzinfo=selected.tzinfo)
+        except ValueError:
+            current=None
+        if current and (current.date(),current.hour)==(selected.date(),selected.hour):
+            self.actual_publish_at=parse_publish_time(current.strftime("%Y-%m-%d %H:%M"),require_five_minutes=False)
+            return
         self.click(date)
         target_month = selected.strftime("%Y年%m月").replace("年0", "年")
         for _ in range(2):
@@ -885,11 +988,15 @@ class BilibiliDraft:
         clock_rect = clock.BoundingRectangle
         # 用户仅指定小时，保留页面当前分钟；不再滚动分钟列。
         def hours():
+            _, current_clock=self.schedule_fields()
+            if current_clock is None:
+                return []
+            current_rect=current_clock.BoundingRectangle
             return [
                 item for item in self.controls()
                 if self.visible(item) and re.fullmatch(r"\d{2}", item.Name)
-                and clock_rect.top - 245 < item.BoundingRectangle.top < clock_rect.top - 15
-                and abs((item.BoundingRectangle.left + item.BoundingRectangle.right) / 2 - (clock_rect.left + 15)) < 25
+                and current_rect.top - 245 < item.BoundingRectangle.top < current_rect.top - 15
+                and abs((item.BoundingRectangle.left + item.BoundingRectangle.right) / 2 - (current_rect.left + 15)) < 25
             ]
         scroll_select(self,hours,selected.hour,"B站小时")
         self.click(self.find("定时发布"))
@@ -907,15 +1014,19 @@ class BilibiliDraft:
         self.select_browser()
         if self.locate("再投一个"):
             self.next_upload()
+        self.validate_bilibili_draft(video,title)
         self.start_keyboard_helper(video.parent / "发布文案.txt")
         self.upload(video)
-        # 一次回到表单开头；后续查找只向下，先封面再标题。
-        self.scroll_page("up", 30)
-        self.wait_name("请输入稿件标题", timeout=30)
+        self.wait_bilibili_form()
         print("投稿表单已出现，视频上传期间开始填写。", flush=True)
         self.input_column()
         stage("cover")
-        self.cover(cover)
+        if not self.bilibili_cover_is_confirmed(video,title,cover):
+            self.reveal_bilibili_cover()
+            self.cover(cover)
+            checkpoint = getattr(self,"on_bilibili_checkpoint",None)
+            if checkpoint:
+                checkpoint({"cover_signature":self.bilibili_cover_signature(video,cover)})
         stage("title")
         self.keyboard_fill(self.find("请输入稿件标题", editable=True), "title", title)
         print("标题已核对。", flush=True)
@@ -924,10 +1035,11 @@ class BilibiliDraft:
         stage("category")
         self.category(category)
         stage("tags")
-        if self.fill_tags(tags):
+        if self.bilibili_tags_match(tags) or self.fill_tags(tags):
             print("标签已确认。", flush=True)
         stage("description")
-        self.description(description)
+        if not self.bilibili_description_matches(description):
+            self.description(description)
         print("简介已核对。", flush=True)
         stage("schedule")
         self.schedule(publish_at)

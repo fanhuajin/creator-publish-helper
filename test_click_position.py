@@ -31,15 +31,16 @@ class ClickTests(unittest.TestCase):
             draft.click_declaration(live)
         draft.click_at.assert_not_called()
 
-    def test_shared_click_preserves_snapshot_behavior(self):
+    def test_shared_click_refreshes_snapshot_position(self):
         live=SimpleNamespace(Name="正文",ControlTypeName="TextControl",
                              BoundingRectangle=rectangle(300),IsOffscreen=False)
         snapshot=ControlSnapshot(live)
         live.BoundingRectangle=rectangle(400)
         draft=object.__new__(BilibiliDraft)
         draft.check=Mock(); draft.visible=lambda c:True; draft.click_at=Mock()
+        draft.move_pointer=Mock();draft.uia=SimpleNamespace(GetCursorPos=lambda:(220,410))
         draft.click(snapshot)
-        draft.click_at.assert_called_once_with((220,310))
+        draft.click_at.assert_called_once_with((220,410))
 
 
 if __name__=="__main__":

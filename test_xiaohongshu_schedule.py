@@ -49,6 +49,16 @@ class XiaohongshuScheduleTests(unittest.TestCase):
         d.click.assert_called_once_with(hour)
         d.scroll_at.assert_not_called()
 
+    def test_top_hour_and_shifted_bottom_edge_remain_identifiable(self):
+        d=self.draft()
+        hours=[control(str(v),2011,881+(v-10)*48) for v in range(10,17)]
+        d.controls=lambda:hours+[control("17",2011,1240),control("分",2109,910),control("04",2087,910)]
+        self.assertEqual(d.xiaohongshu_hour_options(),hours)
+        with patch("schedule_controls.time.sleep"):
+            choose_hour(d,self.selected.replace(hour=10))
+        d.click.assert_called_once_with(hours[0])
+        d.scroll_at.assert_not_called()
+
     def test_heading_present_but_hour_nodes_loading_also_waits(self):
         d=self.draft();label=control("时",300,500);hour=control("06",290,530)
         d.controls=Mock(side_effect=[[label],[label,hour]])

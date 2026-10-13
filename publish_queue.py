@@ -149,13 +149,20 @@ class PublishQueue:
             self.loading = False
 
     def show(self):
+        from keyboard_session import start,stop
+        start()
         self.root.deiconify()
         self.root.lift()
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            stop()
 
     def close(self):
         self.save_queue()
         self.closed = True
+        from keyboard_session import stop
+        stop()
         if not self.running:
             self.root.quit()
 

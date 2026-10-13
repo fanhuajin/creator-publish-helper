@@ -118,9 +118,25 @@ def discard_pending_hotkeys(user):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("copy_file", type=Path, nargs="?", help="可选的初始发布文案路径")
+    parser.add_argument("--owner-pid",type=int,help="发布窗口进程，退出后释放快捷键")
     args = parser.parse_args()
     user = ctypes.WinDLL("user32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    if args.owner_pid:
+        import threading
+        kernel.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+        kernel.OpenProcess.restype=wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes=[wintypes.HANDLE,wintypes.DWORD]
+        kernel.CloseHandle.argtypes=[wintypes.HANDLE]
+        owner=kernel.OpenProcess(0x100000,False,args.owner_pid)
+        if not owner:
+            return
+        def watch_owner():
+            kernel.WaitForSingleObject(owner,0xffffffff)
+            kernel.CloseHandle(owner)
+            # 进程退出会由 Windows 释放热键，即使正在等待用户弹窗也不常驻。
+            os._exit(0)
+        threading.Thread(target=watch_owner,daemon=True).start()
     # 指针接口显式声明，避免 64 位 Python 截断剪贴板内存句柄。
     kernel.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
     kernel.GlobalAlloc.restype = wintypes.HGLOBAL
@@ -317,7 +333,7 @@ def main():
             if not user.RegisterHotKey(None, number, 0x4000, code):
                 raise RuntimeError(f"F{code - 0x6F} 被其他程序占用，请关闭冲突程序")
             registered.append(number)
-        write_keyboard_state(AUTOMATION_READY, {"pid": os.getpid(), "protocol": KEYBOARD_PROTOCOL})
+        write_keyboard_state(AUTOMATION_READY, {"pid": os.getpid(), "protocol": KEYBOARD_PROTOCOL,"owner_pid":args.owner_pid})
         print("点击目标输入框后按 F6 自动识别并填写。F9 退出。", flush=True)
         print("F5：直接使用资源管理器选中的文案文件，成功后弹出提示；其他窗口打开选择框。", flush=True)
         print("B站各字段分别按 F6；抖音/小红书正文一次填写简介和话题。", flush=True)

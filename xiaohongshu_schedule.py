@@ -29,17 +29,23 @@ def hour_options(draft):
             if (re.fullmatch(r"\d{2}",c.Name)
                     and c.ControlTypeName in ("TextControl","ListItemControl")
                     and minute.left-160<r.left<minute.left-40
-                    and minute.top-10<r.top<minute.top+370):
+                    and minute.top-65<r.top<minute.top+370):
                 groups.setdefault(round(r.left/8),[]).append(c)
         columns=[]
         for group in groups.values():
             group.sort(key=lambda c:c.BoundingRectangle.top)
-            values=[int(c.Name) for c in group]
-            gaps=[b.BoundingRectangle.top-a.BoundingRectangle.top for a,b in zip(group,group[1:])]
-            if (len(group)>=3 and all(0<=v<=23 for v in values)
-                    and all(b==a+1 for a,b in zip(values,values[1:]))
-                    and all(25<=gap<=65 for gap in gaps)):
-                columns.append(group)
+            # 边缘裁切节点的坐标可能偏移；仅使用连续、等距的可见部分。
+            runs=[]
+            for c in group:
+                if not 0<=int(c.Name)<=23:
+                    continue
+                if (not runs or int(c.Name)!=int(runs[-1][-1].Name)+1
+                        or not 25<=c.BoundingRectangle.top-runs[-1][-1].BoundingRectangle.top<=65):
+                    runs.append([])
+                runs[-1].append(c)
+            valid=[run for run in runs if len(run)>=3]
+            if valid:
+                columns.append(max(valid,key=len))
         return columns[0] if len(columns)==1 else []
     label=choose_control(labels)
     hr=label.BoundingRectangle

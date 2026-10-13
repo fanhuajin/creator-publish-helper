@@ -34,3 +34,4 @@ multi_publish_state.json.manual-backup
 multi_publish_state.json.before-*
 douyin_datepicker_diagnostic.json
 xiaohongshu_time_diagnostic.json
+bilibili_category_diagnostic.json
