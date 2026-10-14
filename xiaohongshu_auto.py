@@ -230,6 +230,28 @@ class XiaohongshuDraft(DouyinDraft):
         stage=getattr(self,"on_stage",None) or (lambda value:None)
         stage("schedule_calendar")
         self.click(e)
+        self.select_schedule_date(selected, actual)
+        from schedule_controls import wait_hour_readback
+        from xiaohongshu_schedule import choose_hour
+        stage("schedule_hour")
+        choose_hour(self,selected)
+        r=e.BoundingRectangle
+        self.click_at((r.left-35,r.top-40))
+        stage("schedule_readback")
+        def value():
+            current=entry()
+            return current.GetValuePattern().Value if current else None
+        actual=wait_hour_readback(self,value,selected,"小红书")
+        now=datetime.now(selected.tzinfo)
+        if not now+timedelta(hours=1)<=actual<=now+timedelta(days=14):
+            raise RuntimeError("页面时间须在1小时后、14天内。")
+        self.actual_publish_at=actual
+
+    def select_schedule_date(self, selected, actual):
+        # 小红书再次点击已选日期会清空时间并关闭定时开关。
+        if actual is not None and actual.date() == selected.date():
+            return
+        stage=getattr(self,"on_stage",None) or (lambda value:None)
         from calendar_navigation import select_calendar_month
         from bilibili_auto import choose_control
         def read_month():
@@ -244,8 +266,7 @@ class XiaohongshuDraft(DouyinDraft):
             return choose_control([c for c in self.controls() if self.visible(c)
                 and c.ControlTypeName == "ButtonControl" and c.Name in names])
         _, _, month = select_calendar_month(self, selected, read_month, navigation, "小红书日历")
-        from schedule_controls import calendar_day, wait_hour_readback
-        from xiaohongshu_schedule import choose_hour
+        from schedule_controls import calendar_day
         mr = month.BoundingRectangle
         days = [c for c in self.controls() if self.visible(c) and c.Name.isdigit()
                 and mr.left-210<c.BoundingRectangle.left<mr.left+160
@@ -253,19 +274,6 @@ class XiaohongshuDraft(DouyinDraft):
         stage("schedule_date")
         day=calendar_day(days,selected.year,selected.month,selected.day)
         (self.click_declaration if hasattr(day,"control") else self.click)(day)
-        stage("schedule_hour")
-        choose_hour(self,selected)
-        r=e.BoundingRectangle
-        self.click_at((r.left-35,r.top-40))
-        stage("schedule_readback")
-        def value():
-            current=entry()
-            return current.GetValuePattern().Value if current else None
-        actual=wait_hour_readback(self,value,selected,"小红书")
-        now=datetime.now(selected.tzinfo)
-        if not now+timedelta(hours=1)<=actual<=now+timedelta(days=14):
-            raise RuntimeError("页面时间须在1小时后、14天内。")
-        self.actual_publish_at=actual
 
     def xiaohongshu_hour_options(self):
         from xiaohongshu_schedule import hour_options

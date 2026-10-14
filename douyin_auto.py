@@ -159,7 +159,8 @@ class DouyinDraft(BilibiliDraft):
         for _ in range(20):
             self.check()
             empty = self.locate(placeholder)
-            if empty is not None:
+            # 小红书沿用原定位；抖音提示文字在第二条上传刷新时可能失效。
+            if empty is not None and self.page_title != "抖音创作者中心":
                 return empty
             controls = self.controls()
             editors = []
@@ -173,6 +174,8 @@ class DouyinDraft(BilibiliDraft):
                     editors.append(c)
             editor = choose_control(editors)
             if editor is None:
+                if empty is not None:
+                    return empty
                 # 保留旧版页面单独暴露简介文字的情况，输入前仍核验真实焦点。
                 editor = choose_control([c for c in controls if self.visible(c)
                     and c.ControlTypeName == "TextControl" and c.Name.strip() == description.strip()])
@@ -195,10 +198,18 @@ class DouyinDraft(BilibiliDraft):
                 time.sleep(0.15)
         raise RuntimeError("滚动后正文编辑器仍不可见，未清空或输入正文。")
 
-    def focus_description(self, body):
+    def focus_description(self, body, description=None):
         from focus_detection import focused_field
         for _ in range(3):
-            self.click(body)
+            if description is not None:
+                body = self.description_editor("添加作品简介", description)
+            try:
+                self.click(body)
+            except RuntimeError as error:
+                if description is None or str(error) != "目标控件已离开可见区域，停止输入。":
+                    raise
+                time.sleep(0.2)
+                continue
             try:
                 field = focused_field("douyin", self.window.NativeWindowHandle)
             except ValueError:
@@ -221,6 +232,67 @@ class DouyinDraft(BilibiliDraft):
                 return
             time.sleep(0.15)
         raise RuntimeError("未确认抖音AI声明保存并关闭弹窗，未继续发布。")
+
+    def douyin_topic_control(self, tag, accepted=False):
+        """候选只从话题弹层读取；已关联话题只从正文编辑区读取。"""
+        from bilibili_auto import choose_control
+        controls = self.controls()
+        containers = []
+        for c in controls:
+            classes = getattr(c, "ClassName", "").lower().split()
+            matches = ({"zone-container", "editor-kit-container", "editor-comp-publish"}.issubset(classes)
+                       if accepted else "mention-suggest-mount-dom" in classes)
+            if matches and self.visible(c):
+                containers.append(c.BoundingRectangle)
+        found = []
+        for c in controls:
+            # 原始输入为“#标签”；成功关联后单独暴露“标签”文字。
+            if c.Name.strip() != tag or c.ControlTypeName != "TextControl" or not self.visible(c):
+                continue
+            r = c.BoundingRectangle
+            if any(b.left <= r.left < r.right <= b.right and b.top <= r.top < r.bottom <= b.bottom
+                   for b in containers):
+                found.append(c)
+        return choose_control(found)
+
+    def fill_douyin_description(self, description, tags):
+        """抖音独立填写正文和话题，不使用共用助手的截图候选检测。"""
+        from focus_detection import focused_field
+        def check_focus():
+            self.check()
+            if focused_field("douyin", self.window.NativeWindowHandle) != "description":
+                raise RuntimeError("抖音正文焦点已改变，未继续输入话题。")
+        check_focus()
+        self.keys("{Ctrl}a")
+        self.paste(description + " ")
+        self.verify_text(description)
+        self.keys("{Ctrl}{End}")
+        for tag in tags:
+            check_focus()
+            self.keys("#")
+            self.paste(tag)
+            deadline = self.now() + 8
+            stable = 0
+            while self.now() < deadline:
+                self.check()
+                candidate = self.douyin_topic_control(tag)
+                stable = stable + 1 if candidate is not None else 0
+                if stable >= 3:
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError(f"抖音话题 #{tag} 未找到同名候选，未继续发布。")
+            self.click(candidate)
+            deadline = self.now() + 5
+            while self.now() < deadline:
+                self.check()
+                if self.douyin_topic_control(tag, accepted=True) is not None:
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError(f"抖音话题 #{tag} 未确认关联成功，未继续发布。")
+            check_focus()
+            self.keys("{Ctrl}{End}")
 
     def disable_saving(self):
         self.select_option("不允许")
@@ -395,8 +467,8 @@ class DouyinDraft(BilibiliDraft):
         self.keyboard_fill(self.find(hint, editable=True), "title", title)
         body = self.description_editor("添加作品简介", description)
         stage("description")
-        self.focus_description(body)
-        self.keyboard_field("description")
+        self.focus_description(body, description)
+        self.fill_douyin_description(description, tags)
         stage("cover")
         self.vertical_cover(covers[0])
         self.horizontal_cover(covers[1])

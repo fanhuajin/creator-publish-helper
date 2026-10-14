@@ -24,7 +24,7 @@ class CompleteWorkflowTests(unittest.TestCase):
         for name in ("select_browser","next_upload","upload","start_keyboard_helper","scroll_page","input_column",
                      "cover","set_cover","keyboard_fill","declaration","set_declaration","category","fill_tags","description",
                      "schedule","wait_uploaded","choose_file","keys","keyboard_field","focus_description",
-                     "vertical_cover","horizontal_cover"):
+                     "vertical_cover","horizontal_cover","fill_douyin_description"):
             setattr(draft,name,action(name,True if name=="fill_tags" else None))
         draft.on_stage=lambda stage:events.append("stage:"+stage)
         draft.on_submit=action("submitted")

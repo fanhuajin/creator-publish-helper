@@ -71,7 +71,7 @@ class CalendarNavigationTests(unittest.TestCase):
         previous=selected.replace(day=1)-timedelta(days=1)
         label=control("定时发布",y=50)
         entry=control("日期和时间",kind="EditControl",y=90,width=400)
-        entry.GetValuePattern=lambda:NS(Value=selected.replace(hour=12,minute=17).strftime("%Y-%m-%d %H:%M"))
+        entry.GetValuePattern=lambda:NS(Value=previous.replace(hour=12,minute=17).strftime("%Y-%m-%d %H:%M"))
         button=control("下个月",kind="ButtonControl")
         start=selected.replace(day=1)-timedelta(days=selected.replace(day=1).weekday())
         days=[control(str((start+timedelta(days=i)).day),x=105+i%7*30,y=200+i//7*30,width=24) for i in range(42)]

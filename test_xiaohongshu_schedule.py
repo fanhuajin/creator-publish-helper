@@ -32,6 +32,20 @@ class XiaohongshuScheduleTests(unittest.TestCase):
         self.assertEqual(d.xiaohongshu_hour_options(),[])
         d.click.assert_not_called();d.scroll_at.assert_not_called()
 
+    def test_same_date_with_different_hour_is_not_clicked_again(self):
+        d=self.draft();d.controls=Mock(side_effect=AssertionError("不应重读或点击日历"))
+        d.select_schedule_date(self.selected,self.selected.replace(hour=0,minute=1))
+        d.click.assert_not_called();d.controls.assert_not_called()
+
+    def test_different_date_still_selects_calendar_day(self):
+        d=self.draft();day=control("12",300,580)
+        month=control("10月",350,450)
+        d.controls=lambda:[day]
+        with patch("calendar_navigation.select_calendar_month",return_value=(2026,10,month)), \
+             patch("schedule_controls.calendar_day",return_value=day) as select:
+            d.select_schedule_date(self.selected,self.selected.replace(day=13))
+        select.assert_called_once();d.click.assert_called_once_with(day)
+
     def test_real_failure_snapshot_identifies_hour_column_without_heading(self):
         from xiaohongshu_schedule import hour_options
         d=self.draft()
@@ -39,7 +53,18 @@ class XiaohongshuScheduleTests(unittest.TestCase):
             +[control("分",2109,785)]
             +[control(str(v),2098,785+(v-40)*48) for v in range(40,48)]
             +[control(str(v),1610+(v%7)*50,968) for v in range(12,24)])
-        self.assertEqual([c.Name for c in hour_options(d)],list(map(str,range(12,20))))
+        self.assertEqual([c.Name for c in hour_options(d)],list(map(str,range(12,19))))
+
+    def test_faded_bottom_hour_is_scrolled_into_view_before_click(self):
+        d=self.draft();label=control("时",300,500)
+        faded=control("07",290,836);inside=control("07",290,740)
+        first=[label]+[control(f"{v:02d}",290,500+v*48) for v in range(7)]+[faded]
+        second=[label,control("05",290,644),control("06",290,692),inside]
+        d.controls=Mock(side_effect=[first,second])
+        with patch("schedule_controls.time.sleep"):
+            choose_hour(d,self.selected.replace(hour=7))
+        self.assertEqual(d.scroll_at.call_count,1)
+        d.click.assert_called_once_with(inside)
 
     def test_hour_heading_delay_waits_without_reopening_picker(self):
         d=self.draft();label=control("时",300,500);hour=control("06",290,530)

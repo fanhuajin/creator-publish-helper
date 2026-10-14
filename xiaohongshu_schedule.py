@@ -29,7 +29,7 @@ def hour_options(draft):
             if (re.fullmatch(r"\d{2}",c.Name)
                     and c.ControlTypeName in ("TextControl","ListItemControl")
                     and minute.left-160<r.left<minute.left-40
-                    and minute.top-65<r.top<minute.top+370):
+                    and minute.top-65<r.top<minute.top+300):
                 groups.setdefault(round(r.left/8),[]).append(c)
         columns=[]
         for group in groups.values():
@@ -52,7 +52,9 @@ def hour_options(draft):
     options=[c for c in visible if re.fullmatch(r"\d{2}(?:时)?",c.Name)
              and c.ControlTypeName in ("TextControl","ListItemControl")
              and hr.left-50<c.BoundingRectangle.left<hr.right
-             and hr.top-10<c.BoundingRectangle.top<hr.top+370]
+             # 弹层底部有渐隐遮挡；边缘数字虽暴露为控件，点击不会选中。
+             # 保留完整可点行，目标在底部时交给列表滚动移入内部。
+             and hr.top-10<c.BoundingRectangle.top<hr.top+300]
     if any(int(c.Name.removesuffix("时"))>23 for c in options):
         raise RuntimeError("小红书小时列包含无效小时，未滚动或发布。")
     return options
