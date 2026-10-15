@@ -100,6 +100,27 @@ class CalendarNavigationTests(unittest.TestCase):
 
 
 class DraftRecoveryTests(unittest.TestCase):
+    def test_douyin_publish_entry_prefers_panel_over_duplicate_sidebar(self):
+        d=object.__new__(DouyinDraft);d.visible=lambda c:True
+        sidebar=control("作品发布",kind="ButtonControl",x=35,width=190)
+        menu=control("发布视频",x=86,y=293,width=71)
+        panel=control("发布视频",x=305,y=267,width=90)
+        d.controls=lambda:[sidebar,menu,panel]
+        self.assertIs(d.video_publish_entry(),panel)
+
+    def test_douyin_publish_entry_rejects_multiple_panel_entries(self):
+        d=object.__new__(DouyinDraft);d.visible=lambda c:True
+        d.controls=lambda:[control("作品发布",kind="ButtonControl",x=35,width=190),
+            control("发布视频",x=305),control("发布视频",x=600)]
+        with self.assertRaisesRegex(RuntimeError,"多个同名控件"):
+            d.video_publish_entry()
+
+    def test_douyin_publish_entry_accepts_single_menu_entry(self):
+        d=object.__new__(DouyinDraft);d.visible=lambda c:True
+        menu=control("发布视频",x=86)
+        d.controls=lambda:[menu]
+        self.assertIs(d.video_publish_entry(),menu)
+
     def draft(self, cls=DouyinDraft):
         d=object.__new__(cls);d.check=Mock();d.locate=Mock(return_value=None)
         d.visible=lambda c:True;d.now=time.monotonic

@@ -930,9 +930,11 @@ class BilibiliDraft:
         label = self.reveal_schedule()
         date, clock = self.schedule_fields()
         if bool(date) != bool(selected):
+            left = self.input_column()
+            label = self.reveal_schedule()
             rect = label.BoundingRectangle
             self.check()
-            self.click_at((self.input_column() + 16, (rect.top + rect.bottom) // 2))
+            self.click_at((left + 16, (rect.top + rect.bottom) // 2))
             time.sleep(0.2)
         if selected is None:
             if self.schedule_fields()[0] is not None:
@@ -941,13 +943,13 @@ class BilibiliDraft:
         parse_publish_time(selected.strftime("%Y-%m-%d %H:%M"))
         self.reveal_schedule()
         date, clock = self.schedule_fields()
-        for _ in range(6):
+        for _ in range(25):
             if date is not None and clock is not None:
                 break
             time.sleep(0.2)
             date, clock = self.schedule_fields()
         if date is None or clock is None:
-            raise RuntimeError("无法识别定时发布日期和时间。")
+            raise RuntimeError("未确认定时发布开关已开启或日期/时间控件未就绪，请检查定时发布区域；未提交。")
         try:
             current=datetime.strptime(f"{date.Name} {clock.Name}","%Y-%m-%d %H:%M").replace(tzinfo=selected.tzinfo)
         except ValueError:

@@ -400,6 +400,20 @@ class DouyinDraft(BilibiliDraft):
     def fail_calendar_day(self):
         raise RuntimeError("未找到所选日期的日历项。")
 
+    def video_publish_entry(self):
+        """侧栏和作品发布面板可同时显示“发布视频”，优先面板入口。"""
+        from bilibili_auto import choose_control
+        controls = self.controls()
+        matches = [c for c in controls if c.Name == "发布视频" and self.visible(c)]
+        sidebar = [c for c in controls if c.Name == "作品发布"
+                   and c.ControlTypeName == "ButtonControl" and self.visible(c)]
+        if len(sidebar) == 1:
+            edge = sidebar[0].BoundingRectangle.right
+            panel = [c for c in matches if c.BoundingRectangle.left > edge]
+            if panel:
+                return choose_control(panel)
+        return choose_control(matches)
+
     def next_upload(self):
         """等发布后的新页面就绪，再点击一次作品发布并等待上传入口。"""
         print("等待下一条上传页面。", flush=True)
@@ -413,7 +427,7 @@ class DouyinDraft(BilibiliDraft):
             if self.locate("上传视频") or self.locate("上传 视频"):
                 print("下一条上传页面已就绪。", flush=True)
                 return
-            video_entry = self.locate("发布视频")
+            video_entry = self.video_publish_entry() if not entered else None
             if video_entry and not entered:
                 self.click(video_entry)
                 entered = True

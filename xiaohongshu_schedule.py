@@ -49,12 +49,22 @@ def hour_options(draft):
         return columns[0] if len(columns)==1 else []
     label=choose_control(labels)
     hr=label.BoundingRectangle
-    options=[c for c in visible if re.fullmatch(r"\d{2}(?:时)?",c.Name)
+    column=[c for c in visible if re.fullmatch(r"\d{2}(?:时)?",c.Name)
              and c.ControlTypeName in ("TextControl","ListItemControl")
              and hr.left-50<c.BoundingRectangle.left<hr.right
+             and hr.top-400<c.BoundingRectangle.top<hr.top+400]
+    # “时”跟随选中行移动，并非固定表头。用整列顶部确定可点区域，
+    # 否则选中22点时只剩22、23，滚轮会落在底部渐隐遮罩上。
+    minute_labels=[c for c in visible if c.Name=="分"]
+    top=hr.top
+    if len(minute_labels)==1:
+        ceiling=min(hr.top,minute_labels[0].BoundingRectangle.top)-65
+        top=min([hr.top]+[c.BoundingRectangle.top for c in column
+                              if c.BoundingRectangle.top>ceiling])
+    options=[c for c in column
              # 弹层底部有渐隐遮挡；边缘数字虽暴露为控件，点击不会选中。
              # 保留完整可点行，目标在底部时交给列表滚动移入内部。
-             and hr.top-10<c.BoundingRectangle.top<hr.top+300]
+             if top-10<c.BoundingRectangle.top<top+300]
     if any(int(c.Name.removesuffix("时"))>23 for c in options):
         raise RuntimeError("小红书小时列包含无效小时，未滚动或发布。")
     return options

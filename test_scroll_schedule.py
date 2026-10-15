@@ -177,7 +177,9 @@ class ScrollScheduleTests(unittest.TestCase):
             if current["time"]: cs += [hour]+[control(f"{i:02d}",290,530+(i-current['start'])*25) for i in range(current['start'],current['start']+3)]
             return cs
         def click(c):
-            if c is e: current["open"]=True
+            if c is e:
+                current["open"]=True
+                current["time"]=True
             elif c in days: current["time"]=True
             elif c.Name=="06": pattern.Value=selected.replace(minute=17).strftime("%Y-%m-%d %H:%M")
         d.controls=controls; d.form_find=lambda name:label; d.wait_name=lambda name:hour

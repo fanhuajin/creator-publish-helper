@@ -32,6 +32,25 @@ class XiaohongshuScheduleTests(unittest.TestCase):
         self.assertEqual(d.xiaohongshu_hour_options(),[])
         d.click.assert_not_called();d.scroll_at.assert_not_called()
 
+    def test_selected_hour_suffix_at_bottom_does_not_hide_upper_hours(self):
+        d=self.draft()
+        hours=[control(str(v),2011,907+(v-16)*48) for v in range(16,24)]
+        hours[6]=control("22",2001,1195)
+        d.controls=lambda:hours+[control("时",2023,1195),control("分",2109,909),
+            control("08",2098,957),control("16",1810,1093)]
+        self.assertEqual(d.xiaohongshu_hour_options(),hours[:7])
+
+    def test_bottom_selected_hour_scrolls_from_middle_of_column(self):
+        d=self.draft();target=control("08",2011,1003)
+        d.controls=Mock(side_effect=[
+            [control(str(v),2011,907+(v-16)*48) for v in range(16,24)]
+                +[control("时",2023,1195),control("分",2109,909)],
+            [target,control("时",2023,1003)]])
+        with patch("schedule_controls.time.sleep"):
+            choose_hour(d,self.selected.replace(hour=8))
+        d.scroll_at.assert_called_once_with("up",1,(2023,1061))
+        d.click.assert_called_once_with(target)
+
     def test_same_date_with_different_hour_is_not_clicked_again(self):
         d=self.draft();d.controls=Mock(side_effect=AssertionError("不应重读或点击日历"))
         d.select_schedule_date(self.selected,self.selected.replace(hour=0,minute=1))
