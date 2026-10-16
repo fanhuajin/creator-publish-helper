@@ -46,6 +46,23 @@ class TitleTests(unittest.TestCase):
         self.assertEqual([call.args[0] for call in draft.keys.call_args_list],
                          ["{Ctrl}a","{Ctrl}c","{End}"])
 
+    def test_description_accepts_bilibili_paragraph_copy_separators(self):
+        draft=self.draft();draft.now=Mock(side_effect=[0,0.1])
+        draft.clipboard.paste.return_value="今日份心动穿搭🖤\r\n\r\n跟着节奏动起来✨"
+        draft.verify_text("今日份心动穿搭🖤\n跟着节奏动起来✨",paragraph_copy=True)
+
+    def test_paragraph_compatibility_keeps_text_and_blank_lines_strict(self):
+        for expected,actual,enabled in [
+            ("第一行\n第二行","第一行\n\n别的内容",True),
+            ("第一行\n\n第二行","第一行\n第二行",True),
+            ("第一行\n第二行","第一行\n\n第二行",False),
+            ("第一行\n第二行\n第三行","第一行\n\n第二行\n第三行",True)]:
+            with self.subTest(actual=actual,enabled=enabled):
+                draft=self.draft();draft.now=Mock(side_effect=[0,0.1,2])
+                draft.clipboard.paste.return_value=actual
+                with patch("bilibili_auto.time.sleep"),self.assertRaisesRegex(RuntimeError,"文案不一致"):
+                    draft.verify_text(expected,paragraph_copy=enabled)
+
 
 if __name__=="__main__":
     unittest.main()

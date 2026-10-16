@@ -415,21 +415,26 @@ class BilibiliDraft:
         self.clipboard.copy(value)
         self.keys("{Ctrl}v")
 
-    def verify_text(self, expected):
+    def verify_text(self, expected, *, paragraph_copy=False):
         """从当前编辑框复制回读，验证完整文本，禁止只看发送成功日志。"""
         self.keys("{Ctrl}a")
         self.clipboard.copy("")
         self.keys("{Ctrl}c")
         deadline=self.now()+1
         expected_text=expected.replace("\r\n","\n").strip()
+        # B站富文本段落在纯文本剪贴板中以两个换行分隔；仅简介允许
+        # 整体一致的段落转换，不折叠任意空白，也不放宽标题等字段。
+        accepted={expected_text}
+        if paragraph_copy:
+            accepted.add(expected_text.replace("\n", "\n\n"))
         actual=""
         while self.now()<deadline:
             actual = self.clipboard.paste().replace("\r\n", "\n").strip()
-            if actual==expected_text:
+            if actual in accepted:
                 break
             time.sleep(0.05)
         self.keys("{End}")
-        if actual != expected_text:
+        if actual not in accepted:
             raise RuntimeError(f"输入结果与文案不一致：期望{expected_text!r}，回读{actual!r}，流程已停止。")
 
     def verify_edit_value(self, hint, expected):
@@ -511,7 +516,7 @@ class BilibiliDraft:
         if field=="title":
             self.verify_edit_value(control.Name,value)
         else:
-            self.verify_text(value)
+            self.verify_text(value, paragraph_copy=field=="description" and getattr(self,"page_title","B站")=="B站")
 
     def select_browser(self):
         windows = [
@@ -901,7 +906,7 @@ class BilibiliDraft:
         if focus.AutomationId == "RootWebArea":
             raise RuntimeError("焦点为整个页面，停止输入。")
         self.keyboard_field("description")
-        self.verify_text(value)
+        self.verify_text(value, paragraph_copy=True)
 
     def reveal_schedule(self):
         """为下方一行日期/时间留空间；弹层可向上展开，不要求整张日历在下方。"""
