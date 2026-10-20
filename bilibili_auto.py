@@ -1004,16 +1004,33 @@ class BilibiliDraft:
                 if self.visible(item) and re.fullmatch(r"\d{2}", item.Name)
                 and current_rect.top - 245 < item.BoundingRectangle.top < current_rect.top - 15
                 and abs((item.BoundingRectangle.left + item.BoundingRectangle.right) / 2 - (current_rect.left + 15)) < 25
+                and self.hour_option_in_view(item)
             ]
         scroll_select(self,hours,selected.hour,"B站小时")
-        self.click(self.find("定时发布"))
         def value():
             date,clock=self.schedule_fields()
             return f"{date.Name} {clock.Name}" if date and clock else None
         selected_actual=wait_hour_readback(self,value,selected,"B站")
+        self.click(self.find("定时发布"))
+        selected_actual=wait_hour_readback(self,value,selected,"B站")
         actual = parse_publish_time(selected_actual.strftime("%Y-%m-%d %H:%M"), require_five_minutes=False)
         self.actual_publish_at = actual
         print(f"定时已核对：{actual:%Y-%m-%d %H:%M} 北京时间（保留页面分钟）。", flush=True)
+
+    def hour_option_in_view(self, option):
+        """小时数字必须完整位于滚动列内，屏幕可见不代表未被列表裁切。"""
+        bounds=option.BoundingRectangle
+        node=getattr(option,"control",option)
+        for _ in range(5):
+            parent=getattr(node,"GetParentControl",None)
+            node=parent() if parent else None
+            if node is None:
+                return False
+            if "time-picker-panel-select-wrp" in getattr(node,"ClassName","").split():
+                viewport=node.BoundingRectangle
+                return (viewport.left<=bounds.left<bounds.right<=viewport.right
+                        and viewport.top<=bounds.top<bounds.bottom<=viewport.bottom)
+        return False
 
     def run(self, video, title, description, tags, cover, category, publish_at):
         stage = getattr(self, "on_stage", None) or (lambda value: None)

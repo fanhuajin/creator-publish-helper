@@ -241,6 +241,7 @@ class ScrollScheduleTests(unittest.TestCase):
             if c is clock:current['time']=True
             elif c.Name=="06":clock.Name="06:17"
         d.controls=controls;d.reveal_schedule=lambda:label;d.find=lambda name:label
+        d.hour_option_in_view=lambda option:True
         d.schedule_fields=lambda:(date,clock);d.click=Mock(side_effect=click)
         def scroll(direction,amount,target):
             self.assertEqual(direction,"up");self.assertEqual(amount,1);current['start']-=3
