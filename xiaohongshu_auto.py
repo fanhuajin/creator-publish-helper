@@ -104,6 +104,13 @@ class XiaohongshuDraft(DouyinDraft):
                     target=None
             else:
                 target = self.locate(name, editable)
+                if target is None and name == "添加内容类型声明":
+                    target = self.locate("笔记含AI合成内容")
+            # 声明栏可能已进入可访问性树，却仍被固定发布底栏遮住。
+            # 先滚到表单正文内，避免点击被底栏拦截后空等菜单。
+            if (target and name == "添加内容类型声明" and getattr(self, "window", None)
+                    and target.BoundingRectangle.bottom > self.window.BoundingRectangle.bottom-180):
+                target = None
             if target:
                 return target
             self.scroll_form(direction, 4)
@@ -297,7 +304,7 @@ class XiaohongshuDraft(DouyinDraft):
     def set_declaration(self):
         label=self.form_find("添加内容类型声明")
         def selected():
-            current=self.locate("添加内容类型声明")
+            current=self.locate("添加内容类型声明") or self.locate("笔记含AI合成内容")
             if current is None:
                 return False
             r=current.BoundingRectangle

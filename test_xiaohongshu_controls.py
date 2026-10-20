@@ -62,6 +62,16 @@ class ControlsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             classify_field("xiaohongshu",observation)
 
+    def test_declaration_scrolls_clear_of_fixed_footer_before_click(self):
+        draft=object.__new__(XiaohongshuDraft)
+        covered=SimpleNamespace(BoundingRectangle=SimpleNamespace(bottom=1350))
+        visible=SimpleNamespace(BoundingRectangle=SimpleNamespace(bottom=1000))
+        draft.window=SimpleNamespace(BoundingRectangle=SimpleNamespace(bottom=1380))
+        draft.check=Mock();draft.locate=Mock(side_effect=[covered,visible])
+        draft.scroll_form=Mock()
+        self.assertIs(draft.form_find("添加内容类型声明"),visible)
+        draft.scroll_form.assert_called_once_with("down",4)
+
     def test_declaration_menu_text_is_not_mistaken_for_saved_value(self):
         draft=object.__new__(XiaohongshuDraft)
         label=SimpleNamespace(BoundingRectangle=SimpleNamespace(left=100,top=100,right=600,bottom=156))
@@ -82,6 +92,16 @@ class ControlsTests(unittest.TestCase):
         draft.visible=lambda c:True;draft.click=Mock()
         draft.set_declaration()
         draft.click.assert_not_called()
+
+    def test_saved_declaration_replaces_placeholder_on_resume(self):
+        draft=object.__new__(XiaohongshuDraft)
+        saved=SimpleNamespace(Name="笔记含AI合成内容",
+            BoundingRectangle=SimpleNamespace(left=100,top=100,right=600,bottom=156))
+        draft.locate=lambda name,editable=False:saved if name==saved.Name else None
+        draft.controls=lambda:[saved];draft.visible=lambda c:True
+        draft.check=Mock();draft.click=Mock();draft.scroll_form=Mock()
+        draft.set_declaration()
+        draft.click.assert_not_called();draft.scroll_form.assert_not_called()
 
     def test_correct_title_skips_f6(self):
         draft=object.__new__(XiaohongshuDraft)
